@@ -52,6 +52,18 @@ def test_docling_backend_disables_remote_ocr_and_table_models() -> None:
     assert options.enable_remote_services is False
 
 
+def test_docling_backend_can_enable_only_table_structure_model() -> None:
+    from docling.datamodel.base_models import InputFormat
+
+    backend = DoclingConverter._build_backend(do_table_structure=True)
+    options = backend.format_to_options[InputFormat.PDF].pipeline_options
+
+    assert options.do_ocr is False
+    assert options.do_table_structure is True
+    assert options.force_backend_text is True
+    assert options.enable_remote_services is False
+
+
 @pytest.mark.parametrize("name", ["missing.pdf", "sample.txt"])
 def test_validate_request_rejects_invalid_input(tmp_path: Path, name: str) -> None:
     source = tmp_path / name

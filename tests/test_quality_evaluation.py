@@ -48,8 +48,13 @@ def test_evaluation_uses_injected_converter_and_writes_reports(tmp_path: Path) -
 
     heading_result = next(result for result in results if result.case_id == "heading_hierarchy")
     assert heading_result.headings_preserved is True
+    bullet_result = next(result for result in results if result.case_id == "bullet_list")
+    assert bullet_result.bullet_list_preserved is True
     table_result = next(result for result in results if result.case_id == "simple_table")
     assert table_result.table_reproduction == "plain_text"
+    assert table_result.table_rows == 0
+    assert table_result.table_columns == 0
+    assert all(not result.missing_expected_strings for result in results)
 
 
 def test_table_reproduction_distinguishes_structure_from_flattening() -> None:

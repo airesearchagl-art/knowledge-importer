@@ -25,18 +25,23 @@ class DocumentConverterBackend(Protocol):
 class DoclingConverter:
     """Docling engine configured for PDFs that already have a text layer."""
 
-    def __init__(self, backend: DocumentConverterBackend | None = None) -> None:
-        self._backend = backend or self._build_backend()
+    def __init__(
+        self,
+        backend: DocumentConverterBackend | None = None,
+        *,
+        do_table_structure: bool = False,
+    ) -> None:
+        self._backend = backend or self._build_backend(do_table_structure=do_table_structure)
 
     @staticmethod
-    def _build_backend() -> DocumentConverterBackend:
+    def _build_backend(*, do_table_structure: bool = False) -> DocumentConverterBackend:
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.document_converter import DocumentConverter, PdfFormatOption
 
         pipeline_options = PdfPipelineOptions(
             do_ocr=False,
-            do_table_structure=False,
+            do_table_structure=do_table_structure,
             force_backend_text=True,
             enable_remote_services=False,
         )

@@ -48,8 +48,12 @@ class QualityResult:
     heading_levels: dict[str, int | None]
     headings_preserved: bool | None
     reading_order_preserved: bool
+    bullet_list_preserved: bool | None
     table_reproduction: str
+    table_rows: int | None
+    table_columns: int | None
     header_footer_contamination: dict[str, bool]
+    missing_expected_strings: list[str]
     source_pages: int
     text_layer_verified: bool
 
@@ -295,6 +299,29 @@ def _table_reproduction(markdown: str, has_table: bool) -> str:
     return "structured_markdown_table" if max_columns >= 2 else "flattened_markdown_table"
 
 
+def _table_dimensions(markdown: str, has_table: bool) -> tuple[int | None, int | None]:
+    if not has_table:
+        return None, None
+    table_lines = [line for line in markdown.splitlines() if line.count("|") >= 2]
+    data_rows = [line for line in table_lines if not re.fullmatch(r"[| :\-]+", line.strip())]
+    columns = max(
+        (
+            len([cell for cell in line.strip().strip("|").split("|") if cell.strip()])
+            for line in data_rows
+        ),
+        default=0,
+    )
+    return len(data_rows), columns
+
+
+def _bullet_list_preserved(case: QualityCase, markdown: str) -> bool | None:
+    if case.case_id != "bullet_list":
+        return None
+    item_tokens = ("Alpha item", "Beta item", "Gamma item")
+    bullet_lines = [line for line in markdown.splitlines() if re.match(r"^\s*[-*+]\s+", line)]
+    return all(any(token in line for line in bullet_lines) for token in item_tokens)
+
+
 def evaluate_case(
     case: QualityCase, pdf_path: Path, markdown_path: Path, converter: Converter
 ) -> QualityResult:
@@ -316,8 +343,12 @@ def evaluate_case(
             heading_levels={item: None for item, _ in case.expected_headings},
             headings_preserved=False if case.expected_headings else None,
             reading_order_preserved=False,
+            bullet_list_preserved=False if case.case_id == "bullet_list" else None,
             table_reproduction="not_evaluated",
+            table_rows=None,
+            table_columns=None,
             header_footer_contamination={},
+            missing_expected_strings=list(case.expected_strings),
             source_pages=case.expected_pages,
             text_layer_verified=True,
         )
@@ -332,6 +363,7 @@ def evaluate_case(
     contamination = {
         token: token in markdown for token in (*case.header_tokens, *case.footer_tokens)
     }
+    table_rows, table_columns = _table_dimensions(markdown, case.has_table)
     return QualityResult(
         case_id=case.case_id,
         title=case.title,
@@ -345,8 +377,12 @@ def evaluate_case(
         heading_levels=heading_levels,
         headings_preserved=headings_preserved,
         reading_order_preserved=_is_reading_order_preserved(markdown, case.reading_order),
+        bullet_list_preserved=_bullet_list_preserved(case, markdown),
         table_reproduction=_table_reproduction(markdown, case.has_table),
+        table_rows=table_rows,
+        table_columns=table_columns,
         header_footer_contamination=contamination,
+        missing_expected_strings=[item for item, present in found.items() if not present],
         source_pages=case.expected_pages,
         text_layer_verified=True,
     )
@@ -377,7 +413,12 @@ def evaluate_quality(
     return results
 
 
-def write_reports(results: Sequence[QualityResult], output_dir: Path) -> None:
+def write_reports(
+    results: Sequence[QualityResult],
+    output_dir: Path,
+    *,
+    do_table_structure: bool = False,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "quality-report.json"
     json_path.write_text(
@@ -403,14 +444,13 @@ def write_reports(results: Sequence[QualityResult], output_dir: Path) -> None:
             f"{result.headings_preserved} | {result.reading_order_preserved} | "
             f"{result.table_reproduction} | {contamination} |"
         )
-    lines.extend(
-        (
-            "",
-            "Table structure inference is disabled (`do_table_structure=False`). "
-            "Table cells may be emitted as plain text rather than Markdown tables.",
-            "",
-        )
+    table_note = (
+        "Table structure inference is enabled (`do_table_structure=True`)."
+        if do_table_structure
+        else "Table structure inference is disabled (`do_table_structure=False`). "
+        "Table cells may be emitted as plain text rather than Markdown tables."
     )
+    lines.extend(("", table_note, ""))
     (output_dir / "quality-report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
