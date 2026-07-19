@@ -36,6 +36,7 @@ class DoclingConverter:
 
         pipeline_options = PdfPipelineOptions(
             do_ocr=False,
+            do_table_structure=False,
             force_backend_text=True,
             enable_remote_services=False,
         )

@@ -34,7 +34,7 @@ uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md
 
 ## OCR設定
 
-OCR済みPDFを前提とし、Doclingの `do_ocr=False` と `force_backend_text=True` を明示しています。画像だけのスキャンPDFに対する再OCRは行いません。また、`enable_remote_services=False` により外部推論サービスを無効化しています。
+OCR済みPDFを前提とし、Doclingの `do_ocr=False`、`do_table_structure=False`、`force_backend_text=True` を明示しています。画像だけのスキャンPDFに対する再OCRや表構造モデルによる推論は行いません。また、`enable_remote_services=False` により外部推論サービスを無効化しています。
 
 ## 開発時の確認
 
@@ -46,7 +46,7 @@ uv run ruff format --check .
 
 ## 制約とデータ管理
 
-- PDFの複雑な段組み、表、数式ではMarkdownの再現性に差が出ます。
+- PDFの複雑な段組み、表、数式ではMarkdownの再現性に差が出ます。初期版では表構造推論を無効化しています。
 - `do_ocr=False` のため、OCRされていない画像PDFやテキスト層が欠落・破損したPDFからは本文を抽出できません。
 - 実資料、実案件名、実会社名、実個人名をリポジトリへ追加しないでください。
 - `input/`、`output/`、`logs/` の実ファイルはGit管理対象外です。
