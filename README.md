@@ -44,6 +44,8 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
+架空PDFによる変換品質評価の生成方法、指標、既知制約は [PDF変換品質評価](docs/pdf-quality-evaluation.md) を参照してください。
+
 ## 制約とデータ管理
 
 - PDFの複雑な段組み、表、数式ではMarkdownの再現性に差が出ます。初期版では表構造推論を無効化しています。
