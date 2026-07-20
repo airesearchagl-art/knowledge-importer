@@ -38,7 +38,7 @@ class ModeResult:
     model_cache_growth_bytes: int
     model_artifact_bytes_on_disk: int
     offline_requested: bool
-    offline_success: bool
+    all_conversions_succeeded: bool
     results: list[QualityResult]
 
 
@@ -162,7 +162,7 @@ def compare_modes(
                     model_cache, spec.do_table_structure
                 ),
                 offline_requested=offline,
-                offline_success=offline and all(result.success for result in results),
+                all_conversions_succeeded=all(result.success for result in results),
                 results=results,
             )
         )
@@ -222,7 +222,8 @@ def write_comparison_reports(report: ComparisonReport, output_dir: Path) -> None
                 f"- `{mode.mode_id}`: {mode.total_duration_seconds:.3f}s; "
                 f"cache growth {mode.model_cache_growth_bytes} bytes; "
                 f"model artifacts {mode.model_artifact_bytes_on_disk} bytes; "
-                f"offline success={mode.offline_success}",
+                f"offline requested={mode.offline_requested}; "
+                f"all conversions succeeded={mode.all_conversions_succeeded}",
             )
         )
     lines.extend(("", f"Recommendation: `{report.recommendation}`", ""))

@@ -32,7 +32,8 @@ def test_compare_modes_uses_fake_converters_without_docling_inference(tmp_path: 
     )
 
     assert [mode.mode_id for mode in report.modes] == ["baseline", "table_structure"]
-    assert all(mode.offline_success for mode in report.modes)
+    assert all(mode.offline_requested for mode in report.modes)
+    assert all(mode.all_conversions_succeeded for mode in report.modes)
     assert report.modes[0].settings["do_table_structure"] is False
     assert report.modes[1].settings["do_table_structure"] is True
     assert report.recommendation == "optionize_table_structure"
