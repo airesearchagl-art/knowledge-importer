@@ -28,13 +28,15 @@ uv sync --dev
 uv run knowledge-importer --help
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --force
+uv run knowledge-importer convert .\input\table.pdf --output .\output\table.md --table-structure
 ```
 
 既存出力は `--force` なしでは上書きしません。ログは `logs/knowledge-importer.log` に保存します。
+`--table-structure` を指定した場合のみDocling TableFormerによる表構造推論を有効化します。表の行・列をMarkdown表として保持しやすくなる一方、初回は追加モデルの取得が発生する可能性があり、通常モードより処理時間とディスク使用量が増えます。
 
 ## OCR設定
 
-OCR済みPDFを前提とし、Doclingの `do_ocr=False`、`do_table_structure=False`、`force_backend_text=True` を明示しています。画像だけのスキャンPDFに対する再OCRや表構造モデルによる推論は行いません。また、`enable_remote_services=False` により外部推論サービスを無効化しています。
+OCR済みPDFを前提とし、Doclingの `do_ocr=False`、`force_backend_text=True` を明示しています。通常モードは `do_table_structure=False`、`--table-structure` 指定時のみ `do_table_structure=True` です。画像だけのスキャンPDFに対する再OCRは行いません。また、`enable_remote_services=False` により外部推論サービスを無効化しています。
 
 ## 開発時の確認
 
