@@ -6,7 +6,7 @@ from pathlib import Path
 
 from knowledge_importer.converter import (
     Converter,
-    DoclingConverter,
+    build_docling_converter,
     convert_file,
     validate_request,
 )
@@ -25,13 +25,18 @@ def build_parser() -> argparse.ArgumentParser:
     convert_parser.add_argument("input", type=Path, help="入力PDF")
     convert_parser.add_argument("--output", "-o", required=True, type=Path, help="出力Markdown")
     convert_parser.add_argument("--force", action="store_true", help="既存の出力を上書き")
+    convert_parser.add_argument(
+        "--table-structure",
+        action="store_true",
+        help="Doclingの表構造推論を有効化（追加モデルと処理時間が必要）",
+    )
     return parser
 
 
 def run(
     argv: Sequence[str] | None = None,
     *,
-    converter_factory: Callable[[], Converter] = DoclingConverter,
+    converter_factory: Callable[[bool], Converter] = build_docling_converter,
 ) -> int:
     args = build_parser().parse_args(argv)
     request = ConversionRequest(
@@ -47,7 +52,7 @@ def run(
 
     try:
         validate_request(request)
-        convert_file(request, converter_factory())
+        convert_file(request, converter_factory(args.table_structure))
     except KnowledgeImporterError as exc:
         LOGGER.error(
             "conversion_end success=false input=%s output=%s exception_type=%s",
