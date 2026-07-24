@@ -2,12 +2,25 @@ from pathlib import Path
 
 import pytest
 
-from knowledge_importer.cli import build_parser, run
+from knowledge_importer.cli import _build_batch_requests, build_parser, run
+from knowledge_importer.models import KnowledgeImporterError
 
 
 class FakeConverter:
     def convert(self, input_path: Path) -> str:
         return "# Converted\n\nSynthetic content.\n"
+
+
+class RecordingConverter:
+    def __init__(self, *, failing_names: set[str] | None = None) -> None:
+        self.failing_names = failing_names or set()
+        self.inputs: list[Path] = []
+
+    def convert(self, input_path: Path) -> str:
+        self.inputs.append(input_path)
+        if input_path.name in self.failing_names:
+            raise RuntimeError(f"synthetic failure for {input_path.name}")
+        return f"# {input_path.stem}\n"
 
 
 def fake_converter_factory(do_table_structure: bool = False) -> FakeConverter:
@@ -97,3 +110,154 @@ def test_non_pdf_returns_nonzero(tmp_path: Path, capsys: object) -> None:
 
     assert exit_code != 0
     assert "PDFではありません" in capsys.readouterr().err  # type: ignore[attr-defined]
+
+
+def test_directory_converts_direct_pdfs_in_stable_order(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "Beta.pdf").write_bytes(b"%PDF-1.4\n")
+    (input_dir / "alpha.PDF").write_bytes(b"%PDF-1.4\n")
+    (input_dir / "notes.txt").write_text("ignored", encoding="utf-8")
+    nested = input_dir / "nested"
+    nested.mkdir()
+    (nested / "hidden.pdf").write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    converter = RecordingConverter()
+    table_settings: list[bool] = []
+
+    def factory(do_table_structure: bool) -> RecordingConverter:
+        table_settings.append(do_table_structure)
+        return converter
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir)],
+        converter_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert table_settings == [False]
+    assert [path.name for path in converter.inputs] == ["alpha.PDF", "Beta.pdf"]
+    assert (output_dir / "alpha.md").read_text(encoding="utf-8") == "# alpha\n"
+    assert (output_dir / "Beta.md").read_text(encoding="utf-8") == "# Beta\n"
+    assert not (output_dir / "hidden.md").exists()
+    assert not (output_dir / "notes.md").exists()
+
+
+def test_empty_directory_returns_nonzero_without_building_converter(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "notes.txt").write_text("ignored", encoding="utf-8")
+
+    def unexpected_factory(do_table_structure: bool) -> FakeConverter:
+        raise AssertionError("converter must not be built")
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(tmp_path / "output")],
+        converter_factory=unexpected_factory,
+    )
+
+    assert exit_code != 0
+    assert "PDFファイルがありません" in capsys.readouterr().err  # type: ignore[attr-defined]
+
+
+def test_directory_continues_after_failure_and_returns_nonzero(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        (input_dir / name).write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    converter = RecordingConverter(failing_names={"b.pdf"})
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir)],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code != 0
+    assert [path.name for path in converter.inputs] == ["a.pdf", "b.pdf", "c.pdf"]
+    assert (output_dir / "a.md").exists()
+    assert not (output_dir / "b.md").exists()
+    assert (output_dir / "c.md").exists()
+    assert "b.pdf" in captured.err
+    assert "synthetic failure" in captured.err
+    assert "成功=2 失敗=1" in captured.out
+
+
+def test_table_structure_applies_to_entire_directory(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name in ("one.pdf", "two.pdf"):
+        (input_dir / name).write_bytes(b"%PDF-1.4\n")
+    converter = RecordingConverter()
+    table_settings: list[bool] = []
+
+    def factory(do_table_structure: bool) -> RecordingConverter:
+        table_settings.append(do_table_structure)
+        return converter
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--table-structure",
+        ],
+        converter_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert table_settings == [True]
+    assert [path.name for path in converter.inputs] == ["one.pdf", "two.pdf"]
+
+
+def test_force_controls_existing_outputs_in_directory(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name in ("existing.pdf", "new.pdf"):
+        (input_dir / name).write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    existing_output = output_dir / "existing.md"
+    existing_output.write_text("keep", encoding="utf-8")
+
+    first_converter = RecordingConverter()
+    first_exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir)],
+        converter_factory=lambda do_table_structure: first_converter,
+    )
+
+    assert first_exit_code != 0
+    assert existing_output.read_text(encoding="utf-8") == "keep"
+    assert (output_dir / "new.md").exists()
+
+    second_converter = RecordingConverter()
+    second_exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir), "--force"],
+        converter_factory=lambda do_table_structure: second_converter,
+    )
+
+    assert second_exit_code == 0
+    assert existing_output.read_text(encoding="utf-8") == "# existing\n"
+
+
+def test_batch_rejects_conflicting_output_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    monkeypatch.setattr(
+        "knowledge_importer.cli._find_pdf_files",
+        lambda path: [path / "same.pdf", path / "same.PDF"],
+    )
+
+    with pytest.raises(KnowledgeImporterError, match="同じ出力名"):
+        _build_batch_requests(input_dir, tmp_path / "output", force=False)
