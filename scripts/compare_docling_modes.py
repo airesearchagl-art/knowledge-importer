@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from pathlib import Path
 
-from knowledge_importer.converter import Converter, DoclingConverter
+from knowledge_importer.converter import Converter, build_docling_converter
 from scripts.evaluate_pdf_quality import (
     CASES,
     QualityResult,
@@ -56,10 +56,6 @@ MODE_SPECS = (
 )
 
 ConverterBuilder = Callable[[bool], Converter]
-
-
-def build_docling_converter(do_table_structure: bool) -> Converter:
-    return DoclingConverter(do_table_structure=do_table_structure)
 
 
 def directory_size(path: Path) -> int:

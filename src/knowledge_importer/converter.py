@@ -56,6 +56,11 @@ class DoclingConverter:
         return result.document.export_to_markdown()
 
 
+def build_docling_converter(do_table_structure: bool = False) -> Converter:
+    """Build the local Docling converter with optional table inference."""
+    return DoclingConverter(do_table_structure=do_table_structure)
+
+
 def validate_request(request: ConversionRequest) -> None:
     input_path = request.input_path
     if not input_path.exists():
