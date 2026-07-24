@@ -29,10 +29,16 @@ uv run knowledge-importer --help
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --force
 uv run knowledge-importer convert .\input\table.pdf --output .\output\table.md --table-structure
+uv run knowledge-importer convert .\input --output .\output
+uv run knowledge-importer convert .\input --output .\output --force --table-structure
 ```
 
 既存出力は `--force` なしでは上書きしません。ログは `logs/knowledge-importer.log` に保存します。
 `--table-structure` を指定した場合のみDocling TableFormerによる表構造推論を有効化します。表の行・列をMarkdown表として保持しやすくなる一方、初回は追加モデルの取得が発生する可能性があり、通常モードより処理時間とディスク使用量が増えます。
+
+入力にディレクトリを指定すると、直下の `.pdf`（大文字・小文字を区別しない）だけをファイル名の安定順で逐次変換します。サブディレクトリは探索しません。出力は指定ディレクトリの `<入力stem>.md` です。`--table-structure` は全PDFへ適用され、`--force` は各出力の上書きを許可します。
+
+一括変換は1件が失敗しても残りを処理し、最後に成功件数と失敗件数を表示します。全件成功時のみ終了コード `0`、1件以上の失敗または対象PDFが0件の場合は非0です。同じ出力名になるPDFが複数ある場合は、意図しない上書きを避けるため変換開始前に停止します。再帰探索、並列処理、ディレクトリ監視には対応していません。
 
 ## OCR設定
 
