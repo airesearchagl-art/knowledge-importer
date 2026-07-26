@@ -187,7 +187,7 @@ def test_directory_continues_after_failure_and_returns_nonzero(
     assert (output_dir / "c.md").exists()
     assert "b.pdf" in captured.err
     assert "synthetic failure" in captured.err
-    assert "成功=2 失敗=1" in captured.out
+    assert "成功=2 失敗=1 スキップ=0" in captured.out
 
 
 def test_table_structure_applies_to_entire_directory(tmp_path: Path) -> None:
@@ -218,7 +218,10 @@ def test_table_structure_applies_to_entire_directory(tmp_path: Path) -> None:
     assert [path.name for path in converter.inputs] == ["one.pdf", "two.pdf"]
 
 
-def test_force_controls_existing_outputs_in_directory(tmp_path: Path) -> None:
+def test_existing_outputs_are_skipped_and_force_overwrites_in_directory(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     for name in ("existing.pdf", "new.pdf"):
@@ -234,9 +237,13 @@ def test_force_controls_existing_outputs_in_directory(tmp_path: Path) -> None:
         converter_factory=lambda do_table_structure: first_converter,
     )
 
-    assert first_exit_code != 0
+    first_output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert first_exit_code == 0
+    assert [path.name for path in first_converter.inputs] == ["new.pdf"]
     assert existing_output.read_text(encoding="utf-8") == "keep"
     assert (output_dir / "new.md").exists()
+    assert "スキップしました" in first_output
+    assert "成功=1 失敗=0 スキップ=1" in first_output
 
     second_converter = RecordingConverter()
     second_exit_code = run(
@@ -245,7 +252,60 @@ def test_force_controls_existing_outputs_in_directory(tmp_path: Path) -> None:
     )
 
     assert second_exit_code == 0
+    assert [path.name for path in second_converter.inputs] == ["existing.pdf", "new.pdf"]
     assert existing_output.read_text(encoding="utf-8") == "# existing\n"
+
+
+def test_rerun_with_all_outputs_existing_skips_without_building_converter(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "one.pdf").write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    output = output_dir / "one.md"
+    output.write_text("keep", encoding="utf-8")
+
+    def unexpected_factory(do_table_structure: bool) -> FakeConverter:
+        raise AssertionError("converter must not be built when every output is skipped")
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir)],
+        converter_factory=unexpected_factory,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert output.read_text(encoding="utf-8") == "keep"
+    assert "成功=0 失敗=0 スキップ=1" in captured.out
+
+
+def test_converter_factory_failure_reports_pending_and_skipped_counts(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name in ("existing.pdf", "pending.pdf"):
+        (input_dir / name).write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "existing.md").write_text("keep", encoding="utf-8")
+
+    def failing_factory(do_table_structure: bool) -> FakeConverter:
+        raise RuntimeError("synthetic factory failure")
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir)],
+        converter_factory=failing_factory,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code != 0
+    assert "synthetic factory failure" in captured.err
+    assert "成功=0 失敗=1 スキップ=1" in captured.out
 
 
 def test_batch_rejects_conflicting_output_names(
