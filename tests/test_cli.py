@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -314,6 +315,39 @@ def test_converter_factory_failure_reports_pending_and_skipped_counts(
     assert str(tmp_path) not in captured.err
     assert "成功=0 失敗=1 スキップ=1" in captured.out
     assert "converter生成・変換処理関連=1" in captured.out
+
+
+def test_converter_factory_failure_log_omits_traceback_and_local_paths(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name in ("existing.pdf", "pending.pdf"):
+        (input_dir / name).write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "existing.md").write_text("keep", encoding="utf-8")
+
+    def failing_factory(do_table_structure: bool) -> FakeConverter:
+        raise RuntimeError(f"synthetic factory failure at {tmp_path}")
+
+    with caplog.at_level(logging.ERROR, logger="knowledge_importer"):
+        exit_code = run(
+            ["convert", str(input_dir), "--output", str(output_dir)],
+            converter_factory=failing_factory,
+        )
+
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert exit_code == 1
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "Traceback" not in log_text
+    assert str(tmp_path) not in log_text
+    assert "category=CONVERTER" in log_text
+    assert "exception_type=RuntimeError" in log_text
+    assert "success_count=0" in log_text
+    assert "failure_count=1" in log_text
+    assert "skipped_count=1" in log_text
 
 
 def test_directory_reports_multiple_failure_categories_and_continues(

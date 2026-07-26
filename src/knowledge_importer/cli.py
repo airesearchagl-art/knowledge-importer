@@ -352,11 +352,10 @@ def _run_directory(
                 )
                 for request in pending_requests
             ]
-            LOGGER.exception(
-                "batch_conversion_end success=false input=%s output=%s "
+            LOGGER.error(
+                "batch_conversion_end success=false category=%s "
                 "exception_type=%s success_count=0 failure_count=%d skipped_count=%d",
-                input_dir,
-                output_dir,
+                BatchFailureCategory.CONVERTER.name,
                 type(exc).__name__,
                 len(failures),
                 len(skipped_requests),
