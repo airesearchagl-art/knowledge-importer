@@ -1,9 +1,11 @@
+import logging
 from pathlib import Path
 
 import pytest
 
 from knowledge_importer.cli import _build_batch_requests, build_parser, run
-from knowledge_importer.models import KnowledgeImporterError
+from knowledge_importer.converter import Converter
+from knowledge_importer.models import ConversionRequest, KnowledgeImporterError
 
 
 class FakeConverter:
@@ -187,7 +189,10 @@ def test_directory_continues_after_failure_and_returns_nonzero(
     assert (output_dir / "c.md").exists()
     assert "b.pdf" in captured.err
     assert "synthetic failure" in captured.err
+    assert "分類=converter生成・変換処理関連" in captured.err
+    assert str(tmp_path) not in captured.err
     assert "成功=2 失敗=1 スキップ=0" in captured.out
+    assert "converter生成・変換処理関連=1" in captured.out
 
 
 def test_table_structure_applies_to_entire_directory(tmp_path: Path) -> None:
@@ -305,7 +310,128 @@ def test_converter_factory_failure_reports_pending_and_skipped_counts(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert exit_code != 0
     assert "synthetic factory failure" in captured.err
+    assert "ファイル=pending.pdf" in captured.err
+    assert "分類=converter生成・変換処理関連" in captured.err
+    assert str(tmp_path) not in captured.err
     assert "成功=0 失敗=1 スキップ=1" in captured.out
+    assert "converter生成・変換処理関連=1" in captured.out
+
+
+def test_converter_factory_failure_log_omits_traceback_and_local_paths(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name in ("existing.pdf", "pending.pdf"):
+        (input_dir / name).write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "existing.md").write_text("keep", encoding="utf-8")
+
+    def failing_factory(do_table_structure: bool) -> FakeConverter:
+        raise RuntimeError(f"synthetic factory failure at {tmp_path}")
+
+    with caplog.at_level(logging.ERROR, logger="knowledge_importer"):
+        exit_code = run(
+            ["convert", str(input_dir), "--output", str(output_dir)],
+            converter_factory=failing_factory,
+        )
+
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert exit_code == 1
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "Traceback" not in log_text
+    assert str(tmp_path) not in log_text
+    assert "category=CONVERTER" in log_text
+    assert "exception_type=RuntimeError" in log_text
+    assert "success_count=0" in log_text
+    assert "failure_count=1" in log_text
+    assert "skipped_count=1" in log_text
+
+
+def test_directory_reports_multiple_failure_categories_and_continues(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name in ("convert.pdf", "ok.pdf", "output.pdf", "unexpected.pdf"):
+        (input_dir / name).write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "output.md").mkdir()
+    ordered_inputs = [
+        input_dir / "convert.pdf",
+        input_dir / "missing.pdf",
+        input_dir / "ok.pdf",
+        input_dir / "output.pdf",
+        input_dir / "unexpected.pdf",
+    ]
+    monkeypatch.setattr(
+        "knowledge_importer.cli._find_pdf_files",
+        lambda path: ordered_inputs,
+    )
+
+    converter = RecordingConverter(failing_names={"convert.pdf"})
+    from knowledge_importer import cli as cli_module
+
+    original_convert_file = cli_module.convert_file
+
+    def selective_convert_file(
+        request: ConversionRequest,
+        wrapped_converter: Converter,
+    ) -> None:
+        if request.input_path.name == "unexpected.pdf":
+            raise TypeError("synthetic unexpected failure")
+        original_convert_file(request, wrapped_converter)
+
+    monkeypatch.setattr(cli_module, "convert_file", selective_convert_file)
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir)],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code != 0
+    assert [path.name for path in converter.inputs] == ["convert.pdf", "ok.pdf"]
+    assert (output_dir / "ok.md").exists()
+    assert captured.err.count("失敗: ファイル=") == 4
+    assert "ファイル=missing.pdf 分類=入力・パス関連" in captured.err
+    assert "ファイル=output.pdf 分類=出力競合・書き込み関連" in captured.err
+    assert "ファイル=convert.pdf 分類=converter生成・変換処理関連" in captured.err
+    assert "ファイル=unexpected.pdf 分類=想定外エラー" in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "成功=1 失敗=4 スキップ=0" in captured.out
+    assert "入力・パス関連=1" in captured.out
+    assert "出力競合・書き込み関連=1" in captured.out
+    assert "converter生成・変換処理関連=1" in captured.out
+    assert "想定外エラー=1" in captured.out
+
+
+def test_directory_reports_all_files_failed_and_processes_each_one(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    for name in ("a.pdf", "b.pdf"):
+        (input_dir / name).write_bytes(b"%PDF-1.4\n")
+    converter = RecordingConverter(failing_names={"a.pdf", "b.pdf"})
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(tmp_path / "output")],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code != 0
+    assert [path.name for path in converter.inputs] == ["a.pdf", "b.pdf"]
+    assert captured.err.count("分類=converter生成・変換処理関連") == 2
+    assert "成功=0 失敗=2 スキップ=0" in captured.out
+    assert "converter生成・変換処理関連=2" in captured.out
 
 
 def test_batch_rejects_conflicting_output_names(

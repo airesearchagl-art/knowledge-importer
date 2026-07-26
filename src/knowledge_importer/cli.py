@@ -1,7 +1,10 @@
 import argparse
 import logging
+import re
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from knowledge_importer.converter import (
@@ -10,9 +13,53 @@ from knowledge_importer.converter import (
     convert_file,
     validate_request,
 )
-from knowledge_importer.models import ConversionRequest, KnowledgeImporterError
+from knowledge_importer.models import (
+    ConversionRequest,
+    InputValidationError,
+    KnowledgeImporterError,
+    OutputExistsError,
+)
 
 LOGGER = logging.getLogger("knowledge_importer")
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\)[^\s]+")
+_POSIX_ABSOLUTE_PATH = re.compile(r"(?<!\w)/(?:[^/\s]+/)+[^\s]+")
+
+
+class BatchFailureCategory(Enum):
+    INPUT_PATH = "入力・パス関連"
+    OUTPUT = "出力競合・書き込み関連"
+    CONVERTER = "converter生成・変換処理関連"
+    UNEXPECTED = "想定外エラー"
+
+
+@dataclass(frozen=True, slots=True)
+class BatchFailure:
+    file_name: str
+    category: BatchFailureCategory
+    reason: str
+
+
+class _BatchSetupError(KnowledgeImporterError):
+    def __init__(self, category: BatchFailureCategory, message: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+class _BatchConverterError(Exception):
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+class _BatchConverterAdapter:
+    def __init__(self, converter: Converter) -> None:
+        self._converter = converter
+
+    def convert(self, input_path: Path) -> str:
+        try:
+            return self._converter.convert(input_path)
+        except Exception as exc:
+            raise _BatchConverterError(exc) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -136,13 +183,17 @@ def _build_batch_requests(
     force: bool,
 ) -> list[ConversionRequest]:
     if output_dir.exists() and not output_dir.is_dir():
-        raise KnowledgeImporterError(
-            f"ディレクトリ入力時の出力先はディレクトリである必要があります: {output_dir}"
+        raise _BatchSetupError(
+            BatchFailureCategory.OUTPUT,
+            f"出力先はディレクトリである必要があります: {output_dir.name}",
         )
 
     pdf_files = _find_pdf_files(input_dir)
     if not pdf_files:
-        raise KnowledgeImporterError(f"入力ディレクトリ直下にPDFファイルがありません: {input_dir}")
+        raise _BatchSetupError(
+            BatchFailureCategory.INPUT_PATH,
+            f"入力ディレクトリ直下にPDFファイルがありません: {input_dir.name}",
+        )
 
     requests = [
         ConversionRequest(
@@ -157,11 +208,99 @@ def _build_batch_requests(
         output_keys.setdefault(request.output_path.name.casefold(), []).append(request.input_path)
     collisions = [paths for paths in output_keys.values() if len(paths) > 1]
     if collisions:
-        conflicting = ", ".join(str(path) for paths in collisions for path in paths)
-        raise KnowledgeImporterError(
-            f"同じ出力名になるPDFが複数あります。変換を開始しません: {conflicting}"
+        conflicting = ", ".join(path.name for paths in collisions for path in paths)
+        raise _BatchSetupError(
+            BatchFailureCategory.OUTPUT,
+            f"同じ出力名になるPDFが複数あります。変換を開始しません: {conflicting}",
         )
     return requests
+
+
+def _safe_error_reason(exc: Exception, request: ConversionRequest) -> str:
+    message = " ".join(str(exc).split())
+    for path in (request.input_path, request.output_path):
+        replacements = {str(path), str(path.absolute())}
+        for replacement in sorted(replacements, key=len, reverse=True):
+            if replacement:
+                message = message.replace(replacement, path.name)
+    message = _WINDOWS_ABSOLUTE_PATH.sub("<local-path>", message)
+    message = _POSIX_ABSOLUTE_PATH.sub("<local-path>", message)
+    if len(message) > 160:
+        message = f"{message[:157]}..."
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
+def _classify_batch_failure(exc: Exception, request: ConversionRequest) -> BatchFailure:
+    source = exc.cause if isinstance(exc, _BatchConverterError) else exc
+    if isinstance(exc, InputValidationError):
+        category = BatchFailureCategory.INPUT_PATH
+    elif isinstance(exc, OutputExistsError | OSError):
+        category = BatchFailureCategory.OUTPUT
+    elif isinstance(exc, _BatchConverterError):
+        category = BatchFailureCategory.CONVERTER
+    else:
+        category = BatchFailureCategory.UNEXPECTED
+    return BatchFailure(
+        file_name=request.input_path.name,
+        category=category,
+        reason=_safe_error_reason(source, request),
+    )
+
+
+def _print_batch_failure(failure: BatchFailure) -> None:
+    print(
+        f"失敗: ファイル={failure.file_name} 分類={failure.category.value} 理由={failure.reason}",
+        file=sys.stderr,
+    )
+
+
+def _format_batch_summary(
+    success_count: int,
+    failures: Sequence[BatchFailure],
+    skipped_count: int,
+) -> str:
+    summary = f"一括変換完了: 成功={success_count} 失敗={len(failures)} スキップ={skipped_count}"
+    if not failures:
+        return summary
+    counts = {category: 0 for category in BatchFailureCategory}
+    for failure in failures:
+        counts[failure.category] += 1
+    category_summary = " ".join(
+        f"{category.value}={counts[category]}" for category in BatchFailureCategory
+    )
+    return f"{summary} 分類別: {category_summary}"
+
+
+def _convert_batch_request(
+    request: ConversionRequest,
+    converter: Converter,
+) -> BatchFailure | None:
+    LOGGER.info(
+        "conversion_start input=%s output=%s",
+        request.input_path,
+        request.output_path,
+    )
+    try:
+        convert_file(request, _BatchConverterAdapter(converter))
+    except Exception as exc:  # noqa: BLE001 - batch boundary classifies every file failure.
+        failure = _classify_batch_failure(exc, request)
+        LOGGER.error(
+            "conversion_end success=false input=%s output=%s category=%s exception_type=%s",
+            request.input_path,
+            request.output_path,
+            failure.category.name,
+            type(exc.cause if isinstance(exc, _BatchConverterError) else exc).__name__,
+        )
+        _print_batch_failure(failure)
+        return failure
+
+    LOGGER.info(
+        "conversion_end success=true input=%s output=%s exception_type=none",
+        request.input_path,
+        request.output_path,
+    )
+    print(f"変換しました: {request.output_path}")
+    return None
 
 
 def _run_directory(
@@ -174,14 +313,15 @@ def _run_directory(
 ) -> int:
     try:
         requests = _build_batch_requests(input_dir, output_dir, force=force)
-    except KnowledgeImporterError as exc:
+    except _BatchSetupError as exc:
         LOGGER.error(
-            "batch_conversion_end success=false input=%s output=%s exception_type=%s",
+            "batch_conversion_end success=false input=%s output=%s category=%s exception_type=%s",
             input_dir,
             output_dir,
+            exc.category.name,
             type(exc).__name__,
         )
-        print(f"エラー: {exc}", file=sys.stderr)
+        print(f"エラー: 分類={exc.category.value} 理由={exc}", file=sys.stderr)
         return 2
 
     pending_requests: list[ConversionRequest] = []
@@ -204,46 +344,49 @@ def _run_directory(
         try:
             converter = converter_factory(do_table_structure)
         except Exception as exc:  # noqa: BLE001 - CLI boundary must produce a stable exit code.
-            failure_count = len(pending_requests)
-            skipped_count = len(skipped_requests)
-            LOGGER.exception(
-                "batch_conversion_end success=false input=%s output=%s "
+            failures = [
+                BatchFailure(
+                    file_name=request.input_path.name,
+                    category=BatchFailureCategory.CONVERTER,
+                    reason=_safe_error_reason(exc, request),
+                )
+                for request in pending_requests
+            ]
+            LOGGER.error(
+                "batch_conversion_end success=false category=%s "
                 "exception_type=%s success_count=0 failure_count=%d skipped_count=%d",
-                input_dir,
-                output_dir,
+                BatchFailureCategory.CONVERTER.name,
                 type(exc).__name__,
-                failure_count,
-                skipped_count,
+                len(failures),
+                len(skipped_requests),
             )
-            print(
-                f"一括変換を開始できませんでした ({type(exc).__name__}): {exc}",
-                file=sys.stderr,
-            )
-            print(f"一括変換完了: 成功=0 失敗={failure_count} スキップ={skipped_count}")
+            for failure in failures:
+                _print_batch_failure(failure)
+            print(_format_batch_summary(0, failures, len(skipped_requests)))
             return 1
     else:
         converter = None
 
     success_count = 0
-    failure_count = 0
+    failures: list[BatchFailure] = []
     for request in pending_requests:
         assert converter is not None
-        exit_code = _convert_request(request, converter, batch=True)
-        if exit_code == 0:
+        failure = _convert_batch_request(request, converter)
+        if failure is None:
             success_count += 1
         else:
-            failure_count += 1
+            failures.append(failure)
 
     skipped_count = len(skipped_requests)
     LOGGER.info(
         "batch_conversion_end success=%s input=%s output=%s "
         "success_count=%d failure_count=%d skipped_count=%d",
-        str(failure_count == 0).lower(),
+        str(not failures).lower(),
         input_dir,
         output_dir,
         success_count,
-        failure_count,
+        len(failures),
         skipped_count,
     )
-    print(f"一括変換完了: 成功={success_count} 失敗={failure_count} スキップ={skipped_count}")
-    return 0 if failure_count == 0 else 1
+    print(_format_batch_summary(success_count, failures, skipped_count))
+    return 0 if not failures else 1
