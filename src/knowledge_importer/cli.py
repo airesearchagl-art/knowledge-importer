@@ -184,36 +184,66 @@ def _run_directory(
         print(f"エラー: {exc}", file=sys.stderr)
         return 2
 
-    try:
-        converter = converter_factory(do_table_structure)
-    except Exception as exc:  # noqa: BLE001 - CLI boundary must produce a stable exit code.
-        LOGGER.exception(
-            "batch_conversion_end success=false input=%s output=%s exception_type=%s",
-            input_dir,
-            output_dir,
-            type(exc).__name__,
+    pending_requests: list[ConversionRequest] = []
+    skipped_requests: list[ConversionRequest] = []
+    for request in requests:
+        if not force and request.output_path.is_file():
+            skipped_requests.append(request)
+        else:
+            pending_requests.append(request)
+
+    for request in skipped_requests:
+        LOGGER.info(
+            "conversion_skipped input=%s output=%s reason=output_exists",
+            request.input_path,
+            request.output_path,
         )
-        print(
-            f"一括変換を開始できませんでした ({type(exc).__name__}): {exc}",
-            file=sys.stderr,
-        )
-        return 1
+        print(f"スキップしました（出力済み）: {request.output_path}")
+
+    if pending_requests:
+        try:
+            converter = converter_factory(do_table_structure)
+        except Exception as exc:  # noqa: BLE001 - CLI boundary must produce a stable exit code.
+            failure_count = len(pending_requests)
+            skipped_count = len(skipped_requests)
+            LOGGER.exception(
+                "batch_conversion_end success=false input=%s output=%s "
+                "exception_type=%s success_count=0 failure_count=%d skipped_count=%d",
+                input_dir,
+                output_dir,
+                type(exc).__name__,
+                failure_count,
+                skipped_count,
+            )
+            print(
+                f"一括変換を開始できませんでした ({type(exc).__name__}): {exc}",
+                file=sys.stderr,
+            )
+            print(f"一括変換完了: 成功=0 失敗={failure_count} スキップ={skipped_count}")
+            return 1
+    else:
+        converter = None
+
     success_count = 0
     failure_count = 0
-    for request in requests:
+    for request in pending_requests:
+        assert converter is not None
         exit_code = _convert_request(request, converter, batch=True)
         if exit_code == 0:
             success_count += 1
         else:
             failure_count += 1
 
+    skipped_count = len(skipped_requests)
     LOGGER.info(
-        "batch_conversion_end success=%s input=%s output=%s success_count=%d failure_count=%d",
+        "batch_conversion_end success=%s input=%s output=%s "
+        "success_count=%d failure_count=%d skipped_count=%d",
         str(failure_count == 0).lower(),
         input_dir,
         output_dir,
         success_count,
         failure_count,
+        skipped_count,
     )
-    print(f"一括変換完了: 成功={success_count} 失敗={failure_count}")
+    print(f"一括変換完了: 成功={success_count} 失敗={failure_count} スキップ={skipped_count}")
     return 0 if failure_count == 0 else 1
