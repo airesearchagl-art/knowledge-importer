@@ -65,6 +65,16 @@ uv run ruff format --check .
 
 Doclingの表構造推論あり・なしの比較結果は [Docling表構造モード比較](docs/converter-comparison.md) を参照してください。
 
+### Markdown品質の回帰評価
+
+`tests/test_markdown_quality.py` は、実資料やDocling実推論を使わず、合成PDFと合成Markdownだけで変換結果の主要構造を評価します。対象は、見出し階層、本文の主要語句、箇条書き、Markdown表、ページ境界前後の本文、空または極端に短い出力、絶対パス・traceback・制御文字の混入です。
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_markdown_quality.py
+```
+
+評価は空白・大文字小文字・一部のMarkdown装飾差を正規化し、全文完全一致ではなく情報と構造の欠落を判定します。最小文字数は合成fixtureの400文字超に対して120文字とし、軽微な整形差を許容しながら大幅な欠落を検出します。このテストは決定的な回帰検出用であり、実資料の視覚的な忠実度、複雑な段組み・数式、意味的な正確性、あらゆるPDFに対する変換品質を保証するものではありません。
+
 ## 制約とデータ管理
 
 - PDFの複雑な段組み、表、数式ではMarkdownの再現性に差が出ます。初期版では表構造推論を無効化しています。
