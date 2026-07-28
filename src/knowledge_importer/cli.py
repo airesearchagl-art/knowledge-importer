@@ -2,6 +2,7 @@ import argparse
 import logging
 import re
 import sys
+import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -83,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Doclingの表構造推論を有効化（追加モデルと処理時間が必要）",
     )
+    convert_parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="入力ディレクトリ配下のPDFを再帰的に変換",
+    )
     return parser
 
 
@@ -98,6 +104,7 @@ def run(
             args.output,
             force=args.force,
             do_table_structure=args.table_structure,
+            recursive=args.recursive,
             converter_factory=converter_factory,
         )
 
@@ -169,11 +176,64 @@ def _convert_request(
     return 0
 
 
-def _find_pdf_files(input_dir: Path) -> list[Path]:
-    return sorted(
-        (path for path in input_dir.iterdir() if path.is_file() and path.suffix.lower() == ".pdf"),
-        key=lambda path: (path.name.casefold(), path.name),
-    )
+def _is_linked_directory(path: Path) -> bool:
+    return path.is_symlink() or path.is_junction()
+
+
+def _relative_sort_key(path: Path, input_dir: Path) -> tuple[str, str]:
+    relative = path.relative_to(input_dir).as_posix()
+    return (relative.casefold(), relative)
+
+
+def _find_pdf_files(
+    input_dir: Path,
+    *,
+    recursive: bool = False,
+    excluded_dir: Path | None = None,
+) -> list[Path]:
+    if not recursive:
+        return sorted(
+            (
+                path
+                for path in input_dir.iterdir()
+                if not path.is_symlink() and path.is_file() and path.suffix.lower() == ".pdf"
+            ),
+            key=lambda path: _relative_sort_key(path, input_dir),
+        )
+
+    input_root = input_dir.resolve(strict=False)
+    excluded_root = excluded_dir.resolve(strict=False) if excluded_dir is not None else None
+    if excluded_root == input_root or (
+        excluded_root is not None and not excluded_root.is_relative_to(input_root)
+    ):
+        excluded_root = None
+
+    pdf_files: list[Path] = []
+    pending_directories = [input_dir]
+    while pending_directories:
+        directory = pending_directories.pop()
+        child_directories: list[Path] = []
+        for path in directory.iterdir():
+            if path.is_symlink():
+                continue
+            if path.is_file() and path.suffix.lower() == ".pdf":
+                pdf_files.append(path)
+                continue
+            if not path.is_dir() or _is_linked_directory(path):
+                continue
+            if excluded_root is not None and path.resolve(strict=False).is_relative_to(
+                excluded_root
+            ):
+                continue
+            child_directories.append(path)
+        pending_directories.extend(
+            sorted(
+                child_directories,
+                key=lambda path: _relative_sort_key(path, input_dir),
+                reverse=True,
+            )
+        )
+    return sorted(pdf_files, key=lambda path: _relative_sort_key(path, input_dir))
 
 
 def _build_batch_requests(
@@ -181,6 +241,7 @@ def _build_batch_requests(
     output_dir: Path,
     *,
     force: bool,
+    recursive: bool = False,
 ) -> list[ConversionRequest]:
     if output_dir.exists() and not output_dir.is_dir():
         raise _BatchSetupError(
@@ -188,30 +249,63 @@ def _build_batch_requests(
             f"出力先はディレクトリである必要があります: {output_dir.name}",
         )
 
-    pdf_files = _find_pdf_files(input_dir)
-    if not pdf_files:
+    try:
+        pdf_files = _find_pdf_files(
+            input_dir,
+            recursive=recursive,
+            excluded_dir=output_dir,
+        )
+    except OSError as exc:
         raise _BatchSetupError(
             BatchFailureCategory.INPUT_PATH,
-            f"入力ディレクトリ直下にPDFファイルがありません: {input_dir.name}",
+            f"入力ディレクトリを探索できません: {input_dir.name} ({type(exc).__name__})",
+        ) from exc
+    if not pdf_files:
+        scope = "配下" if recursive else "直下"
+        raise _BatchSetupError(
+            BatchFailureCategory.INPUT_PATH,
+            f"入力ディレクトリ{scope}にPDFファイルがありません: {input_dir.name}",
         )
 
-    requests = [
-        ConversionRequest(
-            input_path=input_path,
-            output_path=output_dir / f"{input_path.stem}.md",
-            force=force,
+    output_root = output_dir.resolve(strict=False)
+    requests: list[ConversionRequest] = []
+    for input_path in pdf_files:
+        try:
+            relative_input = input_path.relative_to(input_dir)
+        except ValueError as exc:
+            raise _BatchSetupError(
+                BatchFailureCategory.INPUT_PATH,
+                f"入力ルート外のPDFは処理できません: {input_path.name}",
+            ) from exc
+        relative_output = relative_input.with_suffix(".md")
+        output_path = output_dir / relative_output
+        if not output_path.resolve(strict=False).is_relative_to(output_root):
+            raise _BatchSetupError(
+                BatchFailureCategory.OUTPUT,
+                f"出力先が出力ディレクトリ外になります: {relative_output.as_posix()}",
+            )
+        requests.append(
+            ConversionRequest(
+                input_path=input_path,
+                output_path=output_path,
+                force=force,
+            )
         )
-        for input_path in pdf_files
-    ]
+
     output_keys: dict[str, list[Path]] = {}
     for request in requests:
-        output_keys.setdefault(request.output_path.name.casefold(), []).append(request.input_path)
+        relative_output = request.output_path.relative_to(output_dir).as_posix()
+        output_key = unicodedata.normalize("NFC", relative_output).casefold()
+        output_keys.setdefault(output_key, []).append(request.input_path)
     collisions = [paths for paths in output_keys.values() if len(paths) > 1]
     if collisions:
-        conflicting = ", ".join(path.name for paths in collisions for path in paths)
+        conflicting = ", ".join(
+            path.relative_to(input_dir).as_posix() for paths in collisions for path in paths
+        )
         raise _BatchSetupError(
             BatchFailureCategory.OUTPUT,
-            f"同じ出力名になるPDFが複数あります。変換を開始しません: {conflicting}",
+            "同じ出力名または正規化後の出力パスになるPDFが複数あります。"
+            f"変換を開始しません: {conflicting}",
         )
     return requests
 
@@ -274,20 +368,24 @@ def _format_batch_summary(
 def _convert_batch_request(
     request: ConversionRequest,
     converter: Converter,
+    *,
+    input_name: str,
+    output_name: str,
 ) -> BatchFailure | None:
     LOGGER.info(
         "conversion_start input=%s output=%s",
-        request.input_path,
-        request.output_path,
+        input_name,
+        output_name,
     )
     try:
         convert_file(request, _BatchConverterAdapter(converter))
     except Exception as exc:  # noqa: BLE001 - batch boundary classifies every file failure.
         failure = _classify_batch_failure(exc, request)
+        failure = BatchFailure(input_name, failure.category, failure.reason)
         LOGGER.error(
             "conversion_end success=false input=%s output=%s category=%s exception_type=%s",
-            request.input_path,
-            request.output_path,
+            input_name,
+            output_name,
             failure.category.name,
             type(exc.cause if isinstance(exc, _BatchConverterError) else exc).__name__,
         )
@@ -296,10 +394,10 @@ def _convert_batch_request(
 
     LOGGER.info(
         "conversion_end success=true input=%s output=%s exception_type=none",
-        request.input_path,
-        request.output_path,
+        input_name,
+        output_name,
     )
-    print(f"変換しました: {request.output_path}")
+    print(f"変換しました: {output_name}")
     return None
 
 
@@ -309,15 +407,21 @@ def _run_directory(
     *,
     force: bool,
     do_table_structure: bool,
+    recursive: bool,
     converter_factory: Callable[[bool], Converter],
 ) -> int:
     try:
-        requests = _build_batch_requests(input_dir, output_dir, force=force)
+        requests = _build_batch_requests(
+            input_dir,
+            output_dir,
+            force=force,
+            recursive=recursive,
+        )
     except _BatchSetupError as exc:
         LOGGER.error(
             "batch_conversion_end success=false input=%s output=%s category=%s exception_type=%s",
-            input_dir,
-            output_dir,
+            input_dir.name,
+            output_dir.name,
             exc.category.name,
             type(exc).__name__,
         )
@@ -333,12 +437,14 @@ def _run_directory(
             pending_requests.append(request)
 
     for request in skipped_requests:
+        input_name = request.input_path.relative_to(input_dir).as_posix()
+        output_name = request.output_path.relative_to(output_dir).as_posix()
         LOGGER.info(
             "conversion_skipped input=%s output=%s reason=output_exists",
-            request.input_path,
-            request.output_path,
+            input_name,
+            output_name,
         )
-        print(f"スキップしました（出力済み）: {request.output_path}")
+        print(f"スキップしました（出力済み）: {output_name}")
 
     if pending_requests:
         try:
@@ -346,7 +452,7 @@ def _run_directory(
         except Exception as exc:  # noqa: BLE001 - CLI boundary must produce a stable exit code.
             failures = [
                 BatchFailure(
-                    file_name=request.input_path.name,
+                    file_name=request.input_path.relative_to(input_dir).as_posix(),
                     category=BatchFailureCategory.CONVERTER,
                     reason=_safe_error_reason(exc, request),
                 )
@@ -371,7 +477,12 @@ def _run_directory(
     failures: list[BatchFailure] = []
     for request in pending_requests:
         assert converter is not None
-        failure = _convert_batch_request(request, converter)
+        failure = _convert_batch_request(
+            request,
+            converter,
+            input_name=request.input_path.relative_to(input_dir).as_posix(),
+            output_name=request.output_path.relative_to(output_dir).as_posix(),
+        )
         if failure is None:
             success_count += 1
         else:
@@ -382,8 +493,8 @@ def _run_directory(
         "batch_conversion_end success=%s input=%s output=%s "
         "success_count=%d failure_count=%d skipped_count=%d",
         str(not failures).lower(),
-        input_dir,
-        output_dir,
+        input_dir.name,
+        output_dir.name,
         success_count,
         len(failures),
         skipped_count,

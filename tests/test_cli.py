@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from knowledge_importer.cli import _build_batch_requests, build_parser, run
+from knowledge_importer.cli import _build_batch_requests, _find_pdf_files, build_parser, run
 from knowledge_importer.converter import Converter
 from knowledge_importer.models import ConversionRequest, KnowledgeImporterError
 
@@ -36,12 +36,14 @@ def test_help_describes_convert_command() -> None:
     assert "knowledge-importer" in help_text
 
 
-def test_convert_help_describes_table_structure_option(capsys: object) -> None:
+def test_convert_help_describes_directory_options(capsys: object) -> None:
     with pytest.raises(SystemExit) as exc_info:
         build_parser().parse_args(["convert", "--help"])
 
     assert exc_info.value.code == 0
-    assert "--table-structure" in capsys.readouterr().out  # type: ignore[attr-defined]
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "--table-structure" in help_text
+    assert "--recursive" in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:
@@ -143,6 +145,214 @@ def test_directory_converts_direct_pdfs_in_stable_order(tmp_path: Path) -> None:
     assert (output_dir / "Beta.md").read_text(encoding="utf-8") == "# Beta\n"
     assert not (output_dir / "hidden.md").exists()
     assert not (output_dir / "notes.md").exists()
+
+
+def test_recursive_directory_preserves_structure_and_relative_order(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    (input_dir / "other").mkdir(parents=True)
+    (input_dir / "section" / "deep").mkdir(parents=True)
+    for relative_path in (
+        Path("root.pdf"),
+        Path("section") / "a.pdf",
+        Path("section") / "deep" / "b.PDF",
+        Path("other") / "a.pdf",
+    ):
+        (input_dir / relative_path).write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    converter = RecordingConverter()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert [path.relative_to(input_dir).as_posix() for path in converter.inputs] == [
+        "other/a.pdf",
+        "root.pdf",
+        "section/a.pdf",
+        "section/deep/b.PDF",
+    ]
+    assert (output_dir / "root.md").is_file()
+    assert (output_dir / "other" / "a.md").is_file()
+    assert (output_dir / "section" / "a.md").is_file()
+    assert (output_dir / "section" / "deep" / "b.md").is_file()
+
+
+def test_recursive_directory_skip_and_force_use_nested_output(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    source = input_dir / "section" / "item.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    existing_output = output_dir / "section" / "item.md"
+    existing_output.parent.mkdir(parents=True)
+    existing_output.write_text("keep", encoding="utf-8")
+
+    skipped_converter = RecordingConverter()
+    skipped_exit = run(
+        ["convert", str(input_dir), "--output", str(output_dir), "--recursive"],
+        converter_factory=lambda do_table_structure: skipped_converter,
+    )
+
+    skipped_output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert skipped_exit == 0
+    assert skipped_converter.inputs == []
+    assert existing_output.read_text(encoding="utf-8") == "keep"
+    assert "成功=0 失敗=0 スキップ=1" in skipped_output
+
+    forced_converter = RecordingConverter()
+    forced_exit = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--force",
+        ],
+        converter_factory=lambda do_table_structure: forced_converter,
+    )
+
+    assert forced_exit == 0
+    assert forced_converter.inputs == [source]
+    assert existing_output.read_text(encoding="utf-8") == "# item\n"
+
+
+def test_recursive_directory_excludes_output_subtree_inside_input(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "root.pdf").write_bytes(b"%PDF-1.4\n")
+    output_dir = input_dir / "generated"
+    output_dir.mkdir()
+    (output_dir / "must-not-convert.pdf").write_bytes(b"%PDF-1.4\n")
+    converter = RecordingConverter()
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir), "--recursive"],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert converter.inputs == [input_dir / "root.pdf"]
+    assert (output_dir / "root.md").is_file()
+    assert not (output_dir / "must-not-convert.md").exists()
+
+
+def test_recursive_directory_continues_after_nested_output_creation_failure(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    (input_dir / "blocked").mkdir(parents=True)
+    (input_dir / "blocked" / "fail.pdf").write_bytes(b"%PDF-1.4\n")
+    (input_dir / "ok.pdf").write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    original_mkdir = Path.mkdir
+
+    def selective_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        if path == output_dir / "blocked":
+            raise PermissionError("synthetic directory creation failure")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", selective_mkdir)
+    converter = RecordingConverter()
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(output_dir), "--recursive"],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code == 1
+    assert [path.relative_to(input_dir).as_posix() for path in converter.inputs] == [
+        "blocked/fail.pdf",
+        "ok.pdf",
+    ]
+    assert "ファイル=blocked/fail.pdf 分類=出力競合・書き込み関連" in captured.err
+    assert "成功=1 失敗=1 スキップ=0" in captured.out
+    assert (output_dir / "ok.md").is_file()
+
+
+def test_recursive_directory_does_not_descend_into_linked_directory_logic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    linked_dir = input_dir / "linked"
+    linked_dir.mkdir(parents=True)
+    (input_dir / "root.pdf").write_bytes(b"%PDF-1.4\n")
+    (linked_dir / "hidden.pdf").write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(
+        "knowledge_importer.cli._is_linked_directory",
+        lambda path: path == linked_dir,
+    )
+
+    found = _find_pdf_files(input_dir, recursive=True)
+
+    assert found == [input_dir / "root.pdf"]
+
+
+def test_recursive_directory_does_not_follow_real_symlink_when_supported(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    (external_dir / "outside.pdf").write_bytes(b"%PDF-1.4\n")
+    link = input_dir / "linked"
+    try:
+        link.symlink_to(external_dir, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is not permitted in this environment")
+
+    found = _find_pdf_files(input_dir, recursive=True)
+
+    assert found == []
+
+
+def test_recursive_failure_uses_relative_paths_without_traceback(
+    tmp_path: Path,
+    capsys: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    input_dir = tmp_path / "input"
+    source = input_dir / "section" / "broken.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"%PDF-1.4\n")
+    converter = RecordingConverter(failing_names={"broken.pdf"})
+
+    with caplog.at_level(logging.ERROR, logger="knowledge_importer"):
+        exit_code = run(
+            [
+                "convert",
+                str(input_dir),
+                "--output",
+                str(tmp_path / "output"),
+                "--recursive",
+            ],
+            converter_factory=lambda do_table_structure: converter,
+        )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert exit_code == 1
+    assert "ファイル=section/broken.pdf" in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "Traceback" not in captured.err
+    assert str(tmp_path) not in log_text
+    assert "Traceback" not in log_text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_empty_directory_returns_nonzero_without_building_converter(
@@ -371,7 +581,7 @@ def test_directory_reports_multiple_failure_categories_and_continues(
     ]
     monkeypatch.setattr(
         "knowledge_importer.cli._find_pdf_files",
-        lambda path: ordered_inputs,
+        lambda path, **kwargs: ordered_inputs,
     )
 
     converter = RecordingConverter(failing_names={"convert.pdf"})
@@ -442,8 +652,52 @@ def test_batch_rejects_conflicting_output_names(
     input_dir.mkdir()
     monkeypatch.setattr(
         "knowledge_importer.cli._find_pdf_files",
-        lambda path: [path / "same.pdf", path / "same.PDF"],
+        lambda path, **kwargs: [path / "same.pdf", path / "same.PDF"],
     )
 
     with pytest.raises(KnowledgeImporterError, match="同じ出力名"):
         _build_batch_requests(input_dir, tmp_path / "output", force=False)
+
+
+def test_recursive_batch_rejects_unicode_normalized_output_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    monkeypatch.setattr(
+        "knowledge_importer.cli._find_pdf_files",
+        lambda path, **kwargs: [
+            path / "section" / "Café.pdf",
+            path / "section" / "Cafe\u0301.PDF",
+        ],
+    )
+
+    with pytest.raises(KnowledgeImporterError, match="正規化後の出力パス"):
+        _build_batch_requests(
+            input_dir,
+            tmp_path / "output",
+            force=False,
+            recursive=True,
+        )
+
+
+def test_recursive_batch_rejects_input_outside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    outside = tmp_path / "outside.pdf"
+    monkeypatch.setattr(
+        "knowledge_importer.cli._find_pdf_files",
+        lambda path, **kwargs: [outside],
+    )
+
+    with pytest.raises(KnowledgeImporterError, match="入力ルート外"):
+        _build_batch_requests(
+            input_dir,
+            tmp_path / "output",
+            force=False,
+            recursive=True,
+        )
