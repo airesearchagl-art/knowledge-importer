@@ -7,6 +7,7 @@ from reportlab.pdfgen.canvas import Canvas
 
 from knowledge_importer.markdown_quality import (
     MarkdownQualityExpectation,
+    MarkdownQualityResult,
     evaluate_markdown_quality,
 )
 
@@ -72,7 +73,7 @@ EXPECTATION = MarkdownQualityExpectation(
 
 
 def _generate_synthetic_pdf(path: Path) -> None:
-    canvas = Canvas(str(path), pagesize=A4)
+    canvas = Canvas(str(path), pagesize=A4, invariant=1)
     canvas.setTitle("Synthetic Markdown Quality Fixture")
 
     canvas.setFont("Helvetica-Bold", 20)
@@ -105,13 +106,22 @@ def _generate_synthetic_pdf(path: Path) -> None:
     canvas.save()
 
 
+def _failure_message(result: MarkdownQualityResult) -> str:
+    failed_metrics = [metric for metric in result.metrics if not metric.passed]
+    details = "\n".join(f"- {metric.name}: {metric.reason}" for metric in failed_metrics)
+    return f"{result.reason}\n{details}"
+
+
 def test_synthetic_pdf_has_two_page_text_layer(tmp_path: Path) -> None:
     pdf_path = tmp_path / "synthetic-quality.pdf"
+    duplicate_path = tmp_path / "synthetic-quality-copy.pdf"
     _generate_synthetic_pdf(pdf_path)
+    _generate_synthetic_pdf(duplicate_path)
 
     reader = PdfReader(pdf_path)
     extracted_pages = [page.extract_text() or "" for page in reader.pages]
 
+    assert pdf_path.read_bytes() == duplicate_path.read_bytes()
     assert len(extracted_pages) == 2
     assert "PAGE ONE END" in extracted_pages[0]
     assert "PAGE TWO START" in extracted_pages[1]
@@ -122,7 +132,7 @@ def test_synthetic_pdf_has_two_page_text_layer(tmp_path: Path) -> None:
 def test_complete_markdown_passes_all_quality_metrics() -> None:
     result = evaluate_markdown_quality(VALID_MARKDOWN, EXPECTATION)
 
-    assert result.passed is True
+    assert result.passed is True, _failure_message(result)
     assert result.failed_checks == ()
     assert all(metric.passed for metric in result.metrics)
     assert result.reason == "all 8 checks passed"
@@ -131,22 +141,32 @@ def test_complete_markdown_passes_all_quality_metrics() -> None:
 @pytest.mark.parametrize(
     ("broken_markdown", "expected_failure"),
     [
-        ("", "minimum_length"),
-        (VALID_MARKDOWN.replace("## Envelope Planning", "Envelope Planning"), "headings"),
-        (
+        pytest.param("", "minimum_length", id="empty-output"),
+        pytest.param(
+            VALID_MARKDOWN.replace("## Envelope Planning", "Envelope Planning"),
+            "headings",
+            id="missing-heading",
+        ),
+        pytest.param(
             VALID_MARKDOWN.replace(
                 "| Zone | Rating |\n| --- | --- |\n| North | A1 |\n| South | B2 |",
                 "Zone Rating North A1 South B2",
             ),
             "table_structure",
+            id="flattened-table",
         ),
-        (VALID_MARKDOWN.replace("PAGE TWO START", "PAGE TWO OMITTED"), "page_boundary"),
-        (
+        pytest.param(
+            VALID_MARKDOWN.replace("PAGE TWO START", "PAGE TWO OMITTED"),
+            "page_boundary",
+            id="missing-page-boundary",
+        ),
+        pytest.param(
             VALID_MARKDOWN
             + "\nC:\\Users\\sample\\private.pdf"
             + "\nTraceback (most recent call last):\n"
             + "\u202e",
             "contamination",
+            id="unsafe-content",
         ),
     ],
 )
@@ -171,4 +191,4 @@ def test_minor_whitespace_and_markdown_style_changes_do_not_fail() -> None:
 
     result = evaluate_markdown_quality(restyled, EXPECTATION)
 
-    assert result.passed is True
+    assert result.passed is True, _failure_message(result)
