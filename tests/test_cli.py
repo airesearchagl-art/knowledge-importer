@@ -1,3 +1,4 @@
+import csv
 import json
 import logging
 from pathlib import Path
@@ -5,9 +6,14 @@ from pathlib import Path
 import pytest
 
 from knowledge_importer.cli import (
+    BatchFailureCategory,
+    BatchItemStatus,
+    BatchResult,
+    BatchResultItem,
     _build_batch_requests,
     _find_pdf_files,
     _matches_posix_glob,
+    _write_batch_csv,
     build_parser,
     run,
 )
@@ -47,6 +53,11 @@ def _read_json_report(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _read_csv_report(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8-sig", newline="") as report_file:
+        return list(csv.DictReader(report_file))
+
+
 def test_help_describes_convert_command() -> None:
     help_text = build_parser().format_help()
 
@@ -65,6 +76,7 @@ def test_convert_help_describes_directory_options(capsys: object) -> None:
     assert "--include" in help_text
     assert "--exclude" in help_text
     assert "--report-json" in help_text
+    assert "--report-csv" in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:
@@ -1007,6 +1019,7 @@ def test_batch_without_report_option_does_not_create_json(tmp_path: Path) -> Non
 
     assert exit_code == 0
     assert list(tmp_path.rglob("*.json")) == []
+    assert list(tmp_path.rglob("*.csv")) == []
 
 
 def test_single_pdf_rejects_report_option_without_creating_report(
@@ -1390,3 +1403,469 @@ def test_json_report_atomic_replace_failure_preserves_existing_file(
     assert stderr.strip() == "JSONレポートを書き込めませんでした。"
     assert str(tmp_path) not in stderr
     assert "Traceback" not in stderr
+
+
+def test_csv_report_records_recursive_success_with_bom_and_stable_order(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("Zulu.PDF", "section/架空資料.pdf"))
+    output_dir = tmp_path / "output"
+    report_path = tmp_path / "reports" / "結果.csv"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--report-csv",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    raw_report = report_path.read_bytes()
+    assert exit_code == 0
+    assert raw_report.startswith(b"\xef\xbb\xbf")
+    assert raw_report.endswith(b"\n")
+    assert "架空資料.pdf".encode() in raw_report
+    assert str(tmp_path).encode() not in raw_report
+    assert _read_csv_report(report_path) == [
+        {
+            "input": "section/架空資料.pdf",
+            "output": "section/架空資料.md",
+            "status": "succeeded",
+            "error_category": "",
+            "message": "",
+        },
+        {
+            "input": "Zulu.PDF",
+            "output": "Zulu.md",
+            "status": "succeeded",
+            "error_category": "",
+            "message": "",
+        },
+    ]
+
+
+def test_csv_report_records_partial_failure_and_skip_safely(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("a.pdf", "b.pdf", "c.pdf"))
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "b.md").write_text("keep", encoding="utf-8")
+    report_path = tmp_path / "report.csv"
+    converter = RecordingConverter(failing_names={"a.pdf"})
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--report-csv",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    rows = _read_csv_report(report_path)
+    raw_report = report_path.read_text(encoding="utf-8-sig")
+    assert exit_code == 1
+    assert [row["input"] for row in rows] == ["a.pdf", "b.pdf", "c.pdf"]
+    assert rows[0] == {
+        "input": "a.pdf",
+        "output": "a.md",
+        "status": "failed",
+        "error_category": "converter生成・変換処理関連",
+        "message": "RuntimeError: synthetic failure for a.pdf",
+    }
+    assert rows[1] == {
+        "input": "b.pdf",
+        "output": "b.md",
+        "status": "skipped",
+        "error_category": "",
+        "message": "既存の出力を保持しました。",
+    }
+    assert rows[2]["status"] == "succeeded"
+    assert str(tmp_path) not in raw_report
+    assert "Traceback" not in raw_report
+
+
+def test_csv_report_records_all_factory_failures(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("a.pdf", "b.pdf"))
+    report_path = tmp_path / "report.csv"
+
+    def failing_factory(do_table_structure: bool) -> FakeConverter:
+        raise RuntimeError("synthetic factory failure")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-csv",
+            str(report_path),
+        ],
+        converter_factory=failing_factory,
+    )
+
+    rows = _read_csv_report(report_path)
+    assert exit_code == 1
+    assert [row["status"] for row in rows] == ["failed", "failed"]
+    assert {row["error_category"] for row in rows} == {"converter生成・変換処理関連"}
+
+
+def test_csv_report_records_all_skipped_without_converter(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("a.pdf", "b.pdf"))
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    for name in ("a.md", "b.md"):
+        (output_dir / name).write_text("keep", encoding="utf-8")
+    report_path = tmp_path / "report.csv"
+
+    def unexpected_factory(do_table_structure: bool) -> FakeConverter:
+        raise AssertionError("converter must not be built")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--report-csv",
+            str(report_path),
+        ],
+        converter_factory=unexpected_factory,
+    )
+
+    rows = _read_csv_report(report_path)
+    assert exit_code == 0
+    assert [row["status"] for row in rows] == ["skipped", "skipped"]
+    assert all(row["error_category"] == "" for row in rows)
+
+
+def test_csv_report_writes_header_only_for_empty_filtered_result(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("ignored.pdf",))
+    report_path = tmp_path / "report.csv"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--include",
+            "selected/*.pdf",
+            "--report-csv",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 0
+    assert _read_csv_report(report_path) == []
+    assert (
+        report_path.read_text(encoding="utf-8-sig")
+        == "input,output,status,error_category,message\n"
+    )
+
+
+def test_csv_report_writes_header_for_directory_without_pdfs(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "notes.txt").write_text("ignored", encoding="utf-8")
+    report_path = tmp_path / "report.csv"
+
+    def unexpected_factory(do_table_structure: bool) -> FakeConverter:
+        raise AssertionError("converter must not be built")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-csv",
+            str(report_path),
+        ],
+        converter_factory=unexpected_factory,
+    )
+
+    assert exit_code == 2
+    assert _read_csv_report(report_path) == []
+    assert "PDFファイルがありません" in capsys.readouterr().err  # type: ignore[attr-defined]
+
+
+def test_csv_writer_quotes_comma_quote_and_newline(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.csv"
+    message = 'synthetic, "quoted"\nsecond line'
+    result = BatchResult(
+        (
+            BatchResultItem(
+                input_name="section/a.pdf",
+                output_name="section/a.md",
+                status=BatchItemStatus.FAILED,
+                error_category=BatchFailureCategory.CONVERTER,
+                message=message,
+            ),
+        )
+    )
+
+    _write_batch_csv(report_path, result)
+
+    assert _read_csv_report(report_path)[0]["message"] == message
+
+
+@pytest.mark.parametrize(
+    "report_args",
+    [
+        ("--report-csv", "report.csv"),
+        ("--report-json", "report.json", "--report-csv", "report.csv"),
+    ],
+)
+def test_single_pdf_rejects_csv_report_options(
+    tmp_path: Path,
+    capsys: object,
+    report_args: tuple[str, ...],
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(tmp_path / "one.md"),
+            *report_args,
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 2
+    assert "ディレクトリ一括変換でのみ使用できます" in capsys.readouterr().err  # type: ignore[attr-defined]
+    assert not (tmp_path / "report.csv").exists()
+
+
+def test_json_and_csv_reports_share_items_without_reconverting(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("b.pdf", "section/a.PDF"))
+    output_dir = tmp_path / "output"
+    json_path = tmp_path / "report.json"
+    csv_path = tmp_path / "report.csv"
+    converter = RecordingConverter()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--report-json",
+            str(json_path),
+            "--report-csv",
+            str(csv_path),
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    json_items = _read_json_report(json_path)["items"]
+    csv_rows = _read_csv_report(csv_path)
+    assert exit_code == 0
+    assert len(converter.inputs) == 2
+    assert [
+        {
+            "input": item["input"],
+            "output": item["output"],
+            "status": item["status"],
+            "error_category": item["error_category"] or "",
+            "message": item["message"] or "",
+        }
+        for item in json_items  # type: ignore[union-attr]
+    ] == csv_rows
+
+
+def test_same_json_and_csv_report_path_is_rejected_before_conversion(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    report_path = tmp_path / "report"
+
+    def unexpected_factory(do_table_structure: bool) -> FakeConverter:
+        raise AssertionError("converter must not be built")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-json",
+            str(report_path),
+            "--report-csv",
+            str(tmp_path / "." / "report"),
+        ],
+        converter_factory=unexpected_factory,
+    )
+
+    assert exit_code == 2
+    assert not report_path.exists()
+    assert "異なる出力先" in capsys.readouterr().err  # type: ignore[attr-defined]
+
+
+def test_csv_report_creates_parent_and_replaces_existing_file(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    report_path = tmp_path / "reports" / "report.csv"
+    report_path.parent.mkdir()
+    report_path.write_text("old report", encoding="utf-8")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-csv",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 0
+    assert _read_csv_report(report_path)[0]["status"] == "succeeded"
+
+
+def test_csv_atomic_replace_failure_preserves_existing_file(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    report_path = tmp_path / "report.csv"
+    report_path.write_text("original", encoding="utf-8")
+    original_replace = Path.replace
+
+    def failing_replace(path: Path, target: Path) -> Path:
+        if target == report_path:
+            raise OSError("synthetic replace failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-csv",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 2
+    assert report_path.read_text(encoding="utf-8") == "original"
+    assert list(tmp_path.glob(".report.csv.*.tmp")) == []
+    assert stderr.strip() == "CSVレポートを書き込めませんでした。"
+    assert str(tmp_path) not in stderr
+    assert "Traceback" not in stderr
+
+
+def test_json_success_is_kept_when_csv_write_fails(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from knowledge_importer import cli as cli_module
+
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    json_path = tmp_path / "report.json"
+    csv_path = tmp_path / "report.csv"
+    csv_path.write_text("existing csv", encoding="utf-8")
+
+    def failing_csv(path: Path, result: BatchResult) -> None:
+        raise OSError("synthetic CSV failure")
+
+    monkeypatch.setattr(cli_module, "_write_batch_csv", failing_csv)
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-json",
+            str(json_path),
+            "--report-csv",
+            str(csv_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 2
+    assert _read_json_report(json_path)["exit_code"] == 2
+    assert csv_path.read_text(encoding="utf-8") == "existing csv"
+    assert capsys.readouterr().err.strip() == "CSVレポートを書き込めませんでした。"  # type: ignore[attr-defined]
+
+
+def test_csv_success_is_kept_when_json_write_fails(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from knowledge_importer import cli as cli_module
+
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    json_path = tmp_path / "report.json"
+    json_path.write_text("existing json", encoding="utf-8")
+    csv_path = tmp_path / "report.csv"
+
+    def failing_json(
+        path: Path,
+        result: BatchResult,
+        *,
+        exit_code: int | None = None,
+    ) -> None:
+        raise OSError("synthetic JSON failure")
+
+    monkeypatch.setattr(cli_module, "_write_batch_report", failing_json)
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-json",
+            str(json_path),
+            "--report-csv",
+            str(csv_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 2
+    assert json_path.read_text(encoding="utf-8") == "existing json"
+    assert _read_csv_report(csv_path)[0]["status"] == "succeeded"
+    assert capsys.readouterr().err.strip() == "JSONレポートを書き込めませんでした。"  # type: ignore[attr-defined]
