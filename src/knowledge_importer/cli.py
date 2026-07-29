@@ -1,9 +1,12 @@
 import argparse
+import json
 import logging
 import re
 import sys
+import tempfile
 import unicodedata
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatchcase
@@ -40,6 +43,33 @@ class BatchFailure:
     file_name: str
     category: BatchFailureCategory
     reason: str
+
+
+class BatchItemStatus(Enum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass(frozen=True, slots=True)
+class BatchResultItem:
+    input_name: str
+    output_name: str
+    status: BatchItemStatus
+    error_category: BatchFailureCategory | None = None
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchResult:
+    items: tuple[BatchResultItem, ...]
+
+    def count(self, status: BatchItemStatus) -> int:
+        return sum(item.status is status for item in self.items)
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.count(BatchItemStatus.FAILED) else 0
 
 
 class _BatchSetupError(KnowledgeImporterError):
@@ -105,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="GLOB",
         help="対象から除外する入力ルート相対glob（複数指定可）",
     )
+    convert_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        help="ディレクトリ一括変換の結果をJSONファイルへ出力",
+    )
     return parser
 
 
@@ -123,8 +159,16 @@ def run(
             recursive=args.recursive,
             include_patterns=args.include,
             exclude_patterns=args.exclude,
+            report_json=args.report_json,
             converter_factory=converter_factory,
         )
+
+    if args.report_json is not None:
+        print(
+            "エラー: --report-jsonはディレクトリ一括変換でのみ使用できます",
+            file=sys.stderr,
+        )
+        return 2
 
     request = ConversionRequest(
         input_path=args.input,
@@ -441,21 +485,114 @@ def _print_batch_failure(failure: BatchFailure) -> None:
     )
 
 
-def _format_batch_summary(
-    success_count: int,
-    failures: Sequence[BatchFailure],
-    skipped_count: int,
-) -> str:
-    summary = f"一括変換完了: 成功={success_count} 失敗={len(failures)} スキップ={skipped_count}"
-    if not failures:
+def _format_batch_summary(result: BatchResult) -> str:
+    success_count = result.count(BatchItemStatus.SUCCEEDED)
+    failure_count = result.count(BatchItemStatus.FAILED)
+    skipped_count = result.count(BatchItemStatus.SKIPPED)
+    summary = f"一括変換完了: 成功={success_count} 失敗={failure_count} スキップ={skipped_count}"
+    if not failure_count:
         return summary
     counts = {category: 0 for category in BatchFailureCategory}
-    for failure in failures:
-        counts[failure.category] += 1
+    for item in result.items:
+        if item.error_category is not None:
+            counts[item.error_category] += 1
     category_summary = " ".join(
         f"{category.value}={counts[category]}" for category in BatchFailureCategory
     )
     return f"{summary} 分類別: {category_summary}"
+
+
+def _batch_result_payload(result: BatchResult) -> dict[str, object]:
+    succeeded = result.count(BatchItemStatus.SUCCEEDED)
+    failed = result.count(BatchItemStatus.FAILED)
+    skipped = result.count(BatchItemStatus.SKIPPED)
+    return {
+        "schema_version": 1,
+        "summary": {
+            "total": succeeded + failed + skipped,
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+        },
+        "exit_code": result.exit_code,
+        "items": [
+            {
+                "input": item.input_name,
+                "output": item.output_name,
+                "status": item.status.value,
+                "error_category": (
+                    item.error_category.value if item.error_category is not None else None
+                ),
+                "message": item.message,
+            }
+            for item in result.items
+        ],
+    }
+
+
+def _write_batch_report(report_path: Path, result: BatchResult) -> None:
+    if report_path.is_dir():
+        raise IsADirectoryError
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        _batch_result_payload(result),
+        ensure_ascii=False,
+        indent=2,
+    )
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{report_path.name}.",
+            suffix=".tmp",
+            dir=report_path.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(f"{payload}\n")
+        temporary_path.replace(report_path)
+    except Exception:
+        if temporary_path is not None:
+            with suppress(OSError):
+                temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _finish_batch(result: BatchResult, report_json: Path | None) -> int:
+    print(_format_batch_summary(result))
+    if report_json is None:
+        return result.exit_code
+    try:
+        _write_batch_report(report_json, result)
+    except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+        LOGGER.error(
+            "batch_report_write_failed exception_type=%s",
+            type(exc).__name__,
+        )
+        print("JSONレポートを書き込めませんでした。", file=sys.stderr)
+        return 2
+    return result.exit_code
+
+
+def _batch_result_item(
+    request: ConversionRequest,
+    input_dir: Path,
+    output_dir: Path,
+    status: BatchItemStatus,
+    *,
+    failure: BatchFailure | None = None,
+    message: str | None = None,
+) -> BatchResultItem:
+    return BatchResultItem(
+        input_name=request.input_path.relative_to(input_dir).as_posix(),
+        output_name=request.output_path.relative_to(output_dir).as_posix(),
+        status=status,
+        error_category=failure.category if failure is not None else None,
+        message=failure.reason if failure is not None else message,
+    )
 
 
 def _convert_batch_request(
@@ -503,6 +640,7 @@ def _run_directory(
     recursive: bool,
     include_patterns: Sequence[str],
     exclude_patterns: Sequence[str],
+    report_json: Path | None,
     converter_factory: Callable[[bool], Converter],
 ) -> int:
     try:
@@ -527,9 +665,17 @@ def _run_directory(
 
     pending_requests: list[ConversionRequest] = []
     skipped_requests: list[ConversionRequest] = []
+    result_items: dict[Path, BatchResultItem] = {}
     for request in requests:
         if not force and request.output_path.is_file():
             skipped_requests.append(request)
+            result_items[request.input_path] = _batch_result_item(
+                request,
+                input_dir,
+                output_dir,
+                BatchItemStatus.SKIPPED,
+                message="既存の出力を保持しました。",
+            )
         else:
             pending_requests.append(request)
 
@@ -565,8 +711,16 @@ def _run_directory(
             )
             for failure in failures:
                 _print_batch_failure(failure)
-            print(_format_batch_summary(0, failures, len(skipped_requests)))
-            return 1
+            for request, failure in zip(pending_requests, failures, strict=True):
+                result_items[request.input_path] = _batch_result_item(
+                    request,
+                    input_dir,
+                    output_dir,
+                    BatchItemStatus.FAILED,
+                    failure=failure,
+                )
+            result = BatchResult(tuple(result_items[request.input_path] for request in requests))
+            return _finish_batch(result, report_json)
     else:
         converter = None
 
@@ -582,8 +736,21 @@ def _run_directory(
         )
         if failure is None:
             success_count += 1
+            result_items[request.input_path] = _batch_result_item(
+                request,
+                input_dir,
+                output_dir,
+                BatchItemStatus.SUCCEEDED,
+            )
         else:
             failures.append(failure)
+            result_items[request.input_path] = _batch_result_item(
+                request,
+                input_dir,
+                output_dir,
+                BatchItemStatus.FAILED,
+                failure=failure,
+            )
 
     skipped_count = len(skipped_requests)
     LOGGER.info(
@@ -596,5 +763,5 @@ def _run_directory(
         len(failures),
         skipped_count,
     )
-    print(_format_batch_summary(success_count, failures, skipped_count))
-    return 0 if not failures else 1
+    result = BatchResult(tuple(result_items[request.input_path] for request in requests))
+    return _finish_batch(result, report_json)

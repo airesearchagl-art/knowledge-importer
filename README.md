@@ -34,6 +34,7 @@ uv run knowledge-importer convert .\input --output .\output --force --table-stru
 uv run knowledge-importer convert .\input --output .\output --recursive
 uv run knowledge-importer convert .\input --output .\output --include "*.pdf"
 uv run knowledge-importer convert .\input --output .\output --recursive --include "docs/**/*.pdf" --exclude "archive/**"
+uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json
 ```
 
 単一PDF変換では、既存出力は `--force` なしでは上書きせずエラーにします。一括変換では、既存のMarkdownファイルを `--force` なしで安全にスキップし、`--force` 指定時だけ再生成して上書きします。ログは `logs/knowledge-importer.log` に保存します。
@@ -70,6 +71,43 @@ uv run knowledge-importer convert .\input --output .\output `
 ```
 
 終了コードは、変換対象がすべて成功またはスキップなら `0`、1件以上の変換失敗・converter生成失敗・想定外エラーがあれば `1`、入力ディレクトリが空、出力先形式が不正、同一出力名が衝突するなど一括変換開始前の検証エラーは `2` です。
+
+### JSONレポート
+
+ディレクトリ一括変換で `--report-json PATH` を指定すると、変換終了後にschema version `1`のJSONレポートをUTF-8で出力します。単一PDF変換では使用できません。レポートには入力・出力ルートからのPOSIX形式相対パスだけを記録し、絶対パス、ユーザー名、traceback、時刻などの環境依存情報は含めません。
+
+```json
+{
+  "schema_version": 1,
+  "summary": {
+    "total": 2,
+    "succeeded": 1,
+    "failed": 0,
+    "skipped": 1
+  },
+  "exit_code": 0,
+  "items": [
+    {
+      "input": "section/a.pdf",
+      "output": "section/a.md",
+      "status": "succeeded",
+      "error_category": null,
+      "message": null
+    },
+    {
+      "input": "section/b.PDF",
+      "output": "section/b.md",
+      "status": "skipped",
+      "error_category": null,
+      "message": "既存の出力を保持しました。"
+    }
+  ]
+}
+```
+
+`status`は `succeeded`、`failed`、`skipped` のいずれかです。失敗時の `error_category` と `message` には、通常のstderrと同じ安全化済み分類・理由を記録します。include/excludeで対象外になったPDFは含まず、フィルタ適用後の対象が0件でも空の `items` を持つレポートを生成します。
+
+JSON内の `exit_code` は実際のCLI終了コードと一致します。レポートは一時ファイルへの書き込み後に原子的に置換するため、既存レポートは安全に更新されます。親ディレクトリは必要に応じて作成します。レポート自体の書き込みに失敗した場合は、変換結果にかかわらず終了コード `2` とし、絶対パスを含まない固定メッセージをstderrへ表示します。
 
 ## OCR設定
 
