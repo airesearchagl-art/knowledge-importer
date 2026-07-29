@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from knowledge_importer.cli import _build_batch_requests, _find_pdf_files, build_parser, run
+from knowledge_importer.cli import (
+    _build_batch_requests,
+    _find_pdf_files,
+    _matches_posix_glob,
+    build_parser,
+    run,
+)
 from knowledge_importer.converter import Converter
 from knowledge_importer.models import ConversionRequest, KnowledgeImporterError
 
@@ -29,6 +35,13 @@ def fake_converter_factory(do_table_structure: bool = False) -> FakeConverter:
     return FakeConverter()
 
 
+def _create_pdf_tree(root: Path, relative_paths: tuple[str, ...]) -> None:
+    for relative_path in relative_paths:
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"%PDF-1.4\n")
+
+
 def test_help_describes_convert_command() -> None:
     help_text = build_parser().format_help()
 
@@ -44,6 +57,8 @@ def test_convert_help_describes_directory_options(capsys: object) -> None:
     help_text = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "--table-structure" in help_text
     assert "--recursive" in help_text
+    assert "--include" in help_text
+    assert "--exclude" in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:
@@ -353,6 +368,222 @@ def test_recursive_failure_uses_relative_paths_without_traceback(
     assert str(tmp_path) not in log_text
     assert "Traceback" not in log_text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_posix_glob_matches_relative_path_segments_case_insensitively() -> None:
+    assert _matches_posix_glob(Path("docs/a.pdf"), "docs/**/*.pdf")
+    assert _matches_posix_glob(Path("docs/deep/a.PDF"), "DOCS/**/*.pdf")
+    assert _matches_posix_glob(Path("manual/guide.PDF"), "manual/*.pdf")
+    assert _matches_posix_glob(Path("tmp/a.pdf"), "**/tmp/*")
+    assert _matches_posix_glob(Path("docs/tmp/a.pdf"), "**/tmp/*")
+    assert not _matches_posix_glob(Path("docs/a.pdf"), "*.pdf")
+    assert not _matches_posix_glob(Path("nested/manual/a.pdf"), "manual/*.pdf")
+
+
+@pytest.mark.parametrize(
+    ("include_patterns", "expected_inputs"),
+    [
+        pytest.param((), ("a.pdf", "b.PDF", "c.pdf"), id="include-not-specified"),
+        pytest.param(("a.pdf",), ("a.pdf",), id="include-match"),
+        pytest.param(("missing-*.pdf",), (), id="include-no-match"),
+        pytest.param(("a.pdf", "b.pdf"), ("a.pdf", "b.PDF"), id="multiple-includes"),
+    ],
+)
+def test_non_recursive_include_filters(
+    tmp_path: Path,
+    capsys: object,
+    include_patterns: tuple[str, ...],
+    expected_inputs: tuple[str, ...],
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("a.pdf", "b.PDF", "c.pdf"))
+    converter = RecordingConverter()
+    factory_calls: list[bool] = []
+    args = ["convert", str(input_dir), "--output", str(tmp_path / "output")]
+    for pattern in include_patterns:
+        args.extend(("--include", pattern))
+
+    def factory(do_table_structure: bool) -> RecordingConverter:
+        factory_calls.append(do_table_structure)
+        return converter
+
+    exit_code = run(
+        args,
+        converter_factory=factory,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert tuple(path.name for path in converter.inputs) == expected_inputs
+    if not expected_inputs:
+        assert factory_calls == []
+        assert "成功=0 失敗=0 スキップ=0" in captured.out
+    else:
+        assert factory_calls == [False]
+
+
+@pytest.mark.parametrize(
+    ("exclude_patterns", "expected_inputs"),
+    [
+        pytest.param(("b.pdf",), ("a.pdf", "c.pdf"), id="exclude-match"),
+        pytest.param(("a.pdf", "c.pdf"), ("b.PDF",), id="multiple-excludes"),
+    ],
+)
+def test_non_recursive_exclude_filters(
+    tmp_path: Path,
+    exclude_patterns: tuple[str, ...],
+    expected_inputs: tuple[str, ...],
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("a.pdf", "b.PDF", "c.pdf"))
+    converter = RecordingConverter()
+    args = ["convert", str(input_dir), "--output", str(tmp_path / "output")]
+    for pattern in exclude_patterns:
+        args.extend(("--exclude", pattern))
+
+    exit_code = run(
+        args,
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert tuple(path.name for path in converter.inputs) == expected_inputs
+
+
+def test_exclude_takes_priority_over_include(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("a.pdf", "b.pdf", "c.pdf"))
+    converter = RecordingConverter()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--include",
+            "*.pdf",
+            "--exclude",
+            "b.pdf",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert [path.name for path in converter.inputs] == ["a.pdf", "c.pdf"]
+
+
+def test_recursive_include_uses_input_root_relative_posix_path(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(
+        input_dir,
+        ("root.pdf", "docs/a.pdf", "docs/deep/b.PDF", "manual/guide.pdf"),
+    )
+    converter = RecordingConverter()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--recursive",
+            "--include",
+            "docs/**/*.pdf",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert [path.relative_to(input_dir).as_posix() for path in converter.inputs] == [
+        "docs/a.pdf",
+        "docs/deep/b.PDF",
+    ]
+
+
+def test_recursive_multiple_excludes_use_relative_posix_paths(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(
+        input_dir,
+        (
+            "root.pdf",
+            "archive/old.pdf",
+            "docs/keep.pdf",
+            "docs/tmp/drop.pdf",
+            "tmp/drop-root.pdf",
+        ),
+    )
+    converter = RecordingConverter()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--recursive",
+            "--exclude",
+            "archive/**",
+            "--exclude",
+            "**/tmp/*",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert [path.relative_to(input_dir).as_posix() for path in converter.inputs] == [
+        "docs/keep.pdf",
+        "root.pdf",
+    ]
+
+
+def test_filtered_nested_output_skip_and_force(tmp_path: Path, capsys: object) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("docs/selected.pdf", "docs/ignored.pdf"))
+    output_dir = tmp_path / "output"
+    selected_output = output_dir / "docs" / "selected.md"
+    selected_output.parent.mkdir(parents=True)
+    selected_output.write_text("keep", encoding="utf-8")
+
+    skipped_converter = RecordingConverter()
+    skipped_exit = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--include",
+            "docs/selected.pdf",
+        ],
+        converter_factory=lambda do_table_structure: skipped_converter,
+    )
+
+    skipped_stdout = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert skipped_exit == 0
+    assert skipped_converter.inputs == []
+    assert selected_output.read_text(encoding="utf-8") == "keep"
+    assert "成功=0 失敗=0 スキップ=1" in skipped_stdout
+
+    forced_converter = RecordingConverter()
+    forced_exit = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--include",
+            "docs/selected.pdf",
+            "--force",
+        ],
+        converter_factory=lambda do_table_structure: forced_converter,
+    )
+
+    assert forced_exit == 0
+    assert forced_converter.inputs == [input_dir / "docs" / "selected.pdf"]
+    assert selected_output.read_text(encoding="utf-8") == "# selected\n"
+    assert not (output_dir / "docs" / "ignored.md").exists()
 
 
 def test_empty_directory_returns_nonzero_without_building_converter(
