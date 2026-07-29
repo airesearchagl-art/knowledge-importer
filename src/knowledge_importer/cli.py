@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import logging
 import re
@@ -78,6 +79,10 @@ class _BatchSetupError(KnowledgeImporterError):
         self.category = category
 
 
+class _BatchNoPdfError(_BatchSetupError):
+    pass
+
+
 class _BatchConverterError(Exception):
     def __init__(self, cause: Exception) -> None:
         super().__init__(str(cause))
@@ -141,6 +146,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="ディレクトリ一括変換の結果をJSONファイルへ出力",
     )
+    convert_parser.add_argument(
+        "--report-csv",
+        type=Path,
+        metavar="PATH",
+        help="ディレクトリ一括変換の結果をCSVファイルへ出力",
+    )
     return parser
 
 
@@ -151,6 +162,16 @@ def run(
 ) -> int:
     args = build_parser().parse_args(argv)
     if args.input.is_dir():
+        if (
+            args.report_json is not None
+            and args.report_csv is not None
+            and args.report_json.resolve(strict=False) == args.report_csv.resolve(strict=False)
+        ):
+            print(
+                "エラー: JSONレポートとCSVレポートには異なる出力先を指定してください",
+                file=sys.stderr,
+            )
+            return 2
         return _run_directory(
             args.input,
             args.output,
@@ -160,12 +181,20 @@ def run(
             include_patterns=args.include,
             exclude_patterns=args.exclude,
             report_json=args.report_json,
+            report_csv=args.report_csv,
             converter_factory=converter_factory,
         )
 
-    if args.report_json is not None:
+    if args.report_json is not None or args.report_csv is not None:
+        option_name = (
+            "--report-json"
+            if args.report_json is not None and args.report_csv is None
+            else "--report-csv"
+            if args.report_csv is not None and args.report_json is None
+            else "レポート出力"
+        )
         print(
-            "エラー: --report-jsonはディレクトリ一括変換でのみ使用できます",
+            f"エラー: {option_name}はディレクトリ一括変換でのみ使用できます",
             file=sys.stderr,
         )
         return 2
@@ -399,7 +428,7 @@ def _build_batch_requests(
         if include_patterns or exclude_patterns:
             return []
         scope = "配下" if recursive else "直下"
-        raise _BatchSetupError(
+        raise _BatchNoPdfError(
             BatchFailureCategory.INPUT_PATH,
             f"入力ディレクトリ{scope}にPDFファイルがありません: {input_dir.name}",
         )
@@ -502,7 +531,11 @@ def _format_batch_summary(result: BatchResult) -> str:
     return f"{summary} 分類別: {category_summary}"
 
 
-def _batch_result_payload(result: BatchResult) -> dict[str, object]:
+def _batch_result_payload(
+    result: BatchResult,
+    *,
+    exit_code: int | None = None,
+) -> dict[str, object]:
     succeeded = result.count(BatchItemStatus.SUCCEEDED)
     failed = result.count(BatchItemStatus.FAILED)
     skipped = result.count(BatchItemStatus.SKIPPED)
@@ -514,7 +547,7 @@ def _batch_result_payload(result: BatchResult) -> dict[str, object]:
             "failed": failed,
             "skipped": skipped,
         },
-        "exit_code": result.exit_code,
+        "exit_code": result.exit_code if exit_code is None else exit_code,
         "items": [
             {
                 "input": item.input_name,
@@ -530,13 +563,18 @@ def _batch_result_payload(result: BatchResult) -> dict[str, object]:
     }
 
 
-def _write_batch_report(report_path: Path, result: BatchResult) -> None:
+def _write_batch_report(
+    report_path: Path,
+    result: BatchResult,
+    *,
+    exit_code: int | None = None,
+) -> None:
     if report_path.is_dir():
         raise IsADirectoryError
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
-        _batch_result_payload(result),
+        _batch_result_payload(result, exit_code=exit_code),
         ensure_ascii=False,
         indent=2,
     )
@@ -561,20 +599,102 @@ def _write_batch_report(report_path: Path, result: BatchResult) -> None:
         raise
 
 
-def _finish_batch(result: BatchResult, report_json: Path | None) -> int:
-    print(_format_batch_summary(result))
-    if report_json is None:
-        return result.exit_code
+def _write_batch_csv(report_path: Path, result: BatchResult) -> None:
+    if report_path.is_dir():
+        raise IsADirectoryError
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
     try:
-        _write_batch_report(report_json, result)
-    except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
-        LOGGER.error(
-            "batch_report_write_failed exception_type=%s",
-            type(exc).__name__,
-        )
-        print("JSONレポートを書き込めませんでした。", file=sys.stderr)
-        return 2
-    return result.exit_code
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8-sig",
+            newline="",
+            prefix=f".{report_path.name}.",
+            suffix=".tmp",
+            dir=report_path.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            writer = csv.DictWriter(
+                temporary_file,
+                fieldnames=(
+                    "input",
+                    "output",
+                    "status",
+                    "error_category",
+                    "message",
+                ),
+            )
+            writer.writeheader()
+            for item in result.items:
+                writer.writerow(
+                    {
+                        "input": item.input_name,
+                        "output": item.output_name,
+                        "status": item.status.value,
+                        "error_category": (
+                            item.error_category.value if item.error_category is not None else ""
+                        ),
+                        "message": item.message or "",
+                    }
+                )
+        temporary_path.replace(report_path)
+    except Exception:
+        if temporary_path is not None:
+            with suppress(OSError):
+                temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _write_requested_reports(
+    result: BatchResult,
+    *,
+    report_json: Path | None,
+    report_csv: Path | None,
+) -> bool:
+    report_failed = False
+    if report_csv is not None:
+        try:
+            _write_batch_csv(report_csv, result)
+        except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+            report_failed = True
+            LOGGER.error(
+                "batch_report_write_failed report_type=%s exception_type=%s",
+                "CSV",
+                type(exc).__name__,
+            )
+            print("CSVレポートを書き込めませんでした。", file=sys.stderr)
+    if report_json is not None:
+        try:
+            _write_batch_report(
+                report_json,
+                result,
+                exit_code=2 if report_failed else result.exit_code,
+            )
+        except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+            report_failed = True
+            LOGGER.error(
+                "batch_report_write_failed report_type=%s exception_type=%s",
+                "JSON",
+                type(exc).__name__,
+            )
+            print("JSONレポートを書き込めませんでした。", file=sys.stderr)
+    return report_failed
+
+
+def _finish_batch(
+    result: BatchResult,
+    report_json: Path | None,
+    report_csv: Path | None,
+) -> int:
+    print(_format_batch_summary(result))
+    report_failed = _write_requested_reports(
+        result,
+        report_json=report_json,
+        report_csv=report_csv,
+    )
+    return 2 if report_failed else result.exit_code
 
 
 def _batch_result_item(
@@ -641,6 +761,7 @@ def _run_directory(
     include_patterns: Sequence[str],
     exclude_patterns: Sequence[str],
     report_json: Path | None,
+    report_csv: Path | None,
     converter_factory: Callable[[bool], Converter],
 ) -> int:
     try:
@@ -652,6 +773,22 @@ def _run_directory(
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
         )
+    except _BatchNoPdfError as exc:
+        LOGGER.error(
+            "batch_conversion_end success=false input=%s output=%s category=%s exception_type=%s",
+            input_dir.name,
+            output_dir.name,
+            exc.category.name,
+            type(exc).__name__,
+        )
+        print(f"エラー: 分類={exc.category.value} 理由={exc}", file=sys.stderr)
+        if report_csv is not None:
+            _write_requested_reports(
+                BatchResult(()),
+                report_json=None,
+                report_csv=report_csv,
+            )
+        return 2
     except _BatchSetupError as exc:
         LOGGER.error(
             "batch_conversion_end success=false input=%s output=%s category=%s exception_type=%s",
@@ -720,7 +857,7 @@ def _run_directory(
                     failure=failure,
                 )
             result = BatchResult(tuple(result_items[request.input_path] for request in requests))
-            return _finish_batch(result, report_json)
+            return _finish_batch(result, report_json, report_csv)
     else:
         converter = None
 
@@ -764,4 +901,4 @@ def _run_directory(
         skipped_count,
     )
     result = BatchResult(tuple(result_items[request.input_path] for request in requests))
-    return _finish_batch(result, report_json)
+    return _finish_batch(result, report_json, report_csv)

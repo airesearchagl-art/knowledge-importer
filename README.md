@@ -35,6 +35,8 @@ uv run knowledge-importer convert .\input --output .\output --recursive
 uv run knowledge-importer convert .\input --output .\output --include "*.pdf"
 uv run knowledge-importer convert .\input --output .\output --recursive --include "docs/**/*.pdf" --exclude "archive/**"
 uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json
+uv run knowledge-importer convert .\input --output .\output --report-csv .\reports\batch-result.csv
+uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json --report-csv .\reports\batch-result.csv
 ```
 
 単一PDF変換では、既存出力は `--force` なしでは上書きせずエラーにします。一括変換では、既存のMarkdownファイルを `--force` なしで安全にスキップし、`--force` 指定時だけ再生成して上書きします。ログは `logs/knowledge-importer.log` に保存します。
@@ -108,6 +110,20 @@ uv run knowledge-importer convert .\input --output .\output `
 `status`は `succeeded`、`failed`、`skipped` のいずれかです。失敗時の `error_category` と `message` には、通常のstderrと同じ安全化済み分類・理由を記録します。include/excludeで対象外になったPDFは含まず、フィルタ適用後の対象が0件でも空の `items` を持つレポートを生成します。
 
 JSON内の `exit_code` は実際のCLI終了コードと一致します。レポートは一時ファイルへの書き込み後に原子的に置換するため、既存レポートは安全に更新されます。親ディレクトリは必要に応じて作成します。レポート自体の書き込みに失敗した場合は、変換結果にかかわらず終了コード `2` とし、絶対パスを含まない固定メッセージをstderrへ表示します。
+
+### CSVレポート
+
+ディレクトリ一括変換で `--report-csv PATH` を指定すると、JSONレポートと同じ決定的な処理結果をCSVへ出力します。Excelなどで文字化けしにくいUTF-8 BOM付きで、列順は `input`、`output`、`status`、`error_category`、`message` です。ヘッダーは常に出力し、値がない項目は空文字にします。
+
+```csv
+input,output,status,error_category,message
+section/a.pdf,section/a.md,succeeded,,
+section/b.PDF,section/b.md,skipped,,既存の出力を保持しました。
+```
+
+`input`と`output`には各ルートからのPOSIX形式相対パスだけを記録し、絶対パス、ユーザー名、tracebackなどは含めません。include/exclude対象外は記録せず、フィルタ適用後の対象が0件または入力ディレクトリ内にPDFがない場合もヘッダーだけのCSVを生成します。単一PDF変換では利用できません。
+
+`--report-json`と`--report-csv`は同時指定でき、変換を一度だけ実行して同じ内部結果を両形式へ出力します。ただし同じPATHを両方へ指定することはできません。各レポートは同じ親ディレクトリの一時ファイルから独立して原子的に置換されるため、一方の書き込み失敗で他方の正常なレポートは削除されません。JSONまたはCSVのどちらか一方でも書き込みに失敗した場合、最終終了コードは `2` です。
 
 ## OCR設定
 
