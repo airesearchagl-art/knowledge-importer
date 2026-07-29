@@ -240,6 +240,26 @@ def _matches_batch_filters(
     return not any(_matches_posix_glob(relative_path, pattern) for pattern in exclude_patterns)
 
 
+def _is_selected_pdf(
+    path: Path,
+    input_dir: Path,
+    *,
+    include_patterns: Sequence[str],
+    exclude_patterns: Sequence[str],
+) -> bool:
+    return (
+        not path.is_symlink()
+        and path.is_file()
+        and path.suffix.lower() == ".pdf"
+        and _matches_batch_filters(
+            path,
+            input_dir,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
+    )
+
+
 def _find_pdf_files(
     input_dir: Path,
     *,
@@ -253,10 +273,7 @@ def _find_pdf_files(
             (
                 path
                 for path in input_dir.iterdir()
-                if not path.is_symlink()
-                and path.is_file()
-                and path.suffix.lower() == ".pdf"
-                and _matches_batch_filters(
+                if _is_selected_pdf(
                     path,
                     input_dir,
                     include_patterns=include_patterns,
@@ -279,16 +296,15 @@ def _find_pdf_files(
         directory = pending_directories.pop()
         child_directories: list[Path] = []
         for path in directory.iterdir():
-            if path.is_symlink():
+            if _is_selected_pdf(
+                path,
+                input_dir,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+            ):
+                pdf_files.append(path)
                 continue
-            if path.is_file() and path.suffix.lower() == ".pdf":
-                if _matches_batch_filters(
-                    path,
-                    input_dir,
-                    include_patterns=include_patterns,
-                    exclude_patterns=exclude_patterns,
-                ):
-                    pdf_files.append(path)
+            if path.is_symlink() or path.is_file():
                 continue
             if not path.is_dir() or _is_linked_directory(path):
                 continue

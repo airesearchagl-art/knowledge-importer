@@ -380,6 +380,62 @@ def test_posix_glob_matches_relative_path_segments_case_insensitively() -> None:
     assert not _matches_posix_glob(Path("nested/manual/a.pdf"), "manual/*.pdf")
 
 
+def test_recursive_overlapping_includes_convert_match_once_and_ignore_mismatch(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("docs/selected.pdf", "manual/ignored.pdf"))
+    output_dir = tmp_path / "output"
+    converter = RecordingConverter()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--include",
+            "docs/*.pdf",
+            "--include",
+            "**/selected.pdf",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    generated = sorted(path.relative_to(output_dir).as_posix() for path in output_dir.rglob("*.md"))
+    assert exit_code == 0
+    assert converter.inputs == [input_dir / "docs" / "selected.pdf"]
+    assert len(converter.inputs) == 1
+    assert generated == ["docs/selected.md"]
+
+
+def test_recursive_exclude_prevents_converter_call_and_output(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("docs/excluded.pdf", "docs/keep.pdf"))
+    output_dir = tmp_path / "output"
+    converter = RecordingConverter()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--exclude",
+            "docs/excluded.pdf",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    generated = sorted(path.relative_to(output_dir).as_posix() for path in output_dir.rglob("*.md"))
+    assert exit_code == 0
+    assert converter.inputs == [input_dir / "docs" / "keep.pdf"]
+    assert len(converter.inputs) == 1
+    assert generated == ["docs/keep.md"]
+
+
 @pytest.mark.parametrize(
     ("include_patterns", "expected_inputs"),
     [
