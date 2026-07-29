@@ -6,6 +6,8 @@ import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from fnmatch import fnmatchcase
+from functools import lru_cache
 from pathlib import Path
 
 from knowledge_importer.converter import (
@@ -89,6 +91,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="入力ディレクトリ配下のPDFを再帰的に変換",
     )
+    convert_parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="対象に含める入力ルート相対glob（複数指定可）",
+    )
+    convert_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="対象から除外する入力ルート相対glob（複数指定可）",
+    )
     return parser
 
 
@@ -105,6 +121,8 @@ def run(
             force=args.force,
             do_table_structure=args.table_structure,
             recursive=args.recursive,
+            include_patterns=args.include,
+            exclude_patterns=args.exclude,
             converter_factory=converter_factory,
         )
 
@@ -185,18 +203,82 @@ def _relative_sort_key(path: Path, input_dir: Path) -> tuple[str, str]:
     return (relative.casefold(), relative)
 
 
+def _matches_posix_glob(relative_path: Path, pattern: str) -> bool:
+    path_parts = tuple(part.casefold() for part in relative_path.parts)
+    pattern_parts = tuple(part.casefold() for part in pattern.split("/"))
+
+    @lru_cache
+    def matches(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        pattern_part = pattern_parts[pattern_index]
+        if pattern_part == "**":
+            return matches(path_index, pattern_index + 1) or (
+                path_index < len(path_parts) and matches(path_index + 1, pattern_index)
+            )
+        return (
+            path_index < len(path_parts)
+            and fnmatchcase(path_parts[path_index], pattern_part)
+            and matches(path_index + 1, pattern_index + 1)
+        )
+
+    return matches(0, 0)
+
+
+def _matches_batch_filters(
+    path: Path,
+    input_dir: Path,
+    *,
+    include_patterns: Sequence[str],
+    exclude_patterns: Sequence[str],
+) -> bool:
+    relative_path = path.relative_to(input_dir)
+    if include_patterns and not any(
+        _matches_posix_glob(relative_path, pattern) for pattern in include_patterns
+    ):
+        return False
+    return not any(_matches_posix_glob(relative_path, pattern) for pattern in exclude_patterns)
+
+
+def _is_selected_pdf(
+    path: Path,
+    input_dir: Path,
+    *,
+    include_patterns: Sequence[str],
+    exclude_patterns: Sequence[str],
+) -> bool:
+    return (
+        not path.is_symlink()
+        and path.is_file()
+        and path.suffix.lower() == ".pdf"
+        and _matches_batch_filters(
+            path,
+            input_dir,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
+    )
+
+
 def _find_pdf_files(
     input_dir: Path,
     *,
     recursive: bool = False,
     excluded_dir: Path | None = None,
+    include_patterns: Sequence[str] = (),
+    exclude_patterns: Sequence[str] = (),
 ) -> list[Path]:
     if not recursive:
         return sorted(
             (
                 path
                 for path in input_dir.iterdir()
-                if not path.is_symlink() and path.is_file() and path.suffix.lower() == ".pdf"
+                if _is_selected_pdf(
+                    path,
+                    input_dir,
+                    include_patterns=include_patterns,
+                    exclude_patterns=exclude_patterns,
+                )
             ),
             key=lambda path: _relative_sort_key(path, input_dir),
         )
@@ -214,10 +296,15 @@ def _find_pdf_files(
         directory = pending_directories.pop()
         child_directories: list[Path] = []
         for path in directory.iterdir():
-            if path.is_symlink():
-                continue
-            if path.is_file() and path.suffix.lower() == ".pdf":
+            if _is_selected_pdf(
+                path,
+                input_dir,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+            ):
                 pdf_files.append(path)
+                continue
+            if path.is_symlink() or path.is_file():
                 continue
             if not path.is_dir() or _is_linked_directory(path):
                 continue
@@ -242,6 +329,8 @@ def _build_batch_requests(
     *,
     force: bool,
     recursive: bool = False,
+    include_patterns: Sequence[str] = (),
+    exclude_patterns: Sequence[str] = (),
 ) -> list[ConversionRequest]:
     if output_dir.exists() and not output_dir.is_dir():
         raise _BatchSetupError(
@@ -254,6 +343,8 @@ def _build_batch_requests(
             input_dir,
             recursive=recursive,
             excluded_dir=output_dir,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
         )
     except OSError as exc:
         raise _BatchSetupError(
@@ -261,6 +352,8 @@ def _build_batch_requests(
             f"入力ディレクトリを探索できません: {input_dir.name} ({type(exc).__name__})",
         ) from exc
     if not pdf_files:
+        if include_patterns or exclude_patterns:
+            return []
         scope = "配下" if recursive else "直下"
         raise _BatchSetupError(
             BatchFailureCategory.INPUT_PATH,
@@ -408,6 +501,8 @@ def _run_directory(
     force: bool,
     do_table_structure: bool,
     recursive: bool,
+    include_patterns: Sequence[str],
+    exclude_patterns: Sequence[str],
     converter_factory: Callable[[bool], Converter],
 ) -> int:
     try:
@@ -416,6 +511,8 @@ def _run_directory(
             output_dir,
             force=force,
             recursive=recursive,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
         )
     except _BatchSetupError as exc:
         LOGGER.error(

@@ -32,6 +32,8 @@ uv run knowledge-importer convert .\input\table.pdf --output .\output\table.md -
 uv run knowledge-importer convert .\input --output .\output
 uv run knowledge-importer convert .\input --output .\output --force --table-structure
 uv run knowledge-importer convert .\input --output .\output --recursive
+uv run knowledge-importer convert .\input --output .\output --include "*.pdf"
+uv run knowledge-importer convert .\input --output .\output --recursive --include "docs/**/*.pdf" --exclude "archive/**"
 ```
 
 単一PDF変換では、既存出力は `--force` なしでは上書きせずエラーにします。一括変換では、既存のMarkdownファイルを `--force` なしで安全にスキップし、`--force` 指定時だけ再生成して上書きします。ログは `logs/knowledge-importer.log` に保存します。
@@ -47,7 +49,18 @@ input/section/deep/b.pdf   -> output/section/deep/b.md
 
 再帰探索ではsymlinkおよびjunctionのディレクトリを追跡しません。出力先が入力ディレクトリ配下にある場合、その出力サブツリーを探索対象から除外するため、生成済みMarkdownや出力先に置かれたPDFを再入力しません。
 
-一括変換は1件が失敗しても残りを処理し、最後に `成功=<件数> 失敗=<件数> スキップ=<件数>` を表示します。既存出力のスキップだけであれば終了コード `0`、1件以上の変換失敗または対象PDFが0件の場合は非0です。同じ出力パスへ正規化されるPDFが複数ある場合は、意図しない上書きを避けるため変換開始前に停止します。同じ入力と出力先で再実行した場合、未指定時は生成済みファイルを保持し、`--force` 指定時は安定した相対パスで再生成します。並列処理、再帰深度指定、include/exclude glob、ディレクトリ監視には対応していません。
+`--include GLOB` と `--exclude GLOB` は複数回指定でき、非再帰・再帰のどちらでも入力ルートからのPOSIX形式相対パス（`/` 区切り）に対して大小文字を区別せず評価します。include未指定時は全PDF、指定時はどれかのincludeに一致したPDFだけを候補とし、その後どれかのexcludeに一致したPDFを必ず除外します。`*` はディレクトリ区切りを跨がず、`**` は0階層以上を表します。
+
+```powershell
+uv run knowledge-importer convert .\input --output .\output `
+  --include "manual/*.PDF" `
+  --include "docs/**/*.pdf" `
+  --exclude "archive/**" `
+  --exclude "**/tmp/*" `
+  --recursive
+```
+
+一括変換は1件が失敗しても残りを処理し、最後に `成功=<件数> 失敗=<件数> スキップ=<件数>` を表示します。既存出力のスキップだけであれば終了コード `0`、1件以上の変換失敗またはフィルタ未指定で対象PDFが0件の場合は非0です。include/exclude指定後の対象が0件の場合は正常終了し、`成功=0 失敗=0 スキップ=0` を表示します。同じ出力パスへ正規化されるPDFが複数ある場合は、意図しない上書きを避けるため変換開始前に停止します。同じ入力と出力先で再実行した場合、未指定時は生成済みファイルを保持し、`--force` 指定時は安定した相対パスで再生成します。並列処理、再帰深度指定、ディレクトリ監視には対応していません。
 
 失敗時はローカル絶対パスやtracebackを表示せず、対象ファイル名、分類、短い理由をstderrへ出します。分類は「入力・パス関連」「出力競合・書き込み関連」「converter生成・変換処理関連」「想定外エラー」の4種類です。失敗がある場合はsummaryにも分類別件数を追加します。
 
