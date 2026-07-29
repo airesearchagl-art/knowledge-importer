@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -42,6 +43,10 @@ def _create_pdf_tree(root: Path, relative_paths: tuple[str, ...]) -> None:
         path.write_bytes(b"%PDF-1.4\n")
 
 
+def _read_json_report(path: Path) -> dict[str, object]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_help_describes_convert_command() -> None:
     help_text = build_parser().format_help()
 
@@ -59,6 +64,7 @@ def test_convert_help_describes_directory_options(capsys: object) -> None:
     assert "--recursive" in help_text
     assert "--include" in help_text
     assert "--exclude" in help_text
+    assert "--report-json" in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:
@@ -988,3 +994,399 @@ def test_recursive_batch_rejects_input_outside_root(
             force=False,
             recursive=True,
         )
+
+
+def test_batch_without_report_option_does_not_create_json(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+
+    exit_code = run(
+        ["convert", str(input_dir), "--output", str(tmp_path / "output")],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 0
+    assert list(tmp_path.rglob("*.json")) == []
+
+
+def test_single_pdf_rejects_report_option_without_creating_report(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    report_path = tmp_path / "report.json"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(tmp_path / "one.md"),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 2
+    assert not report_path.exists()
+    assert "ディレクトリ一括変換でのみ使用できます" in capsys.readouterr().err  # type: ignore[attr-defined]
+
+
+def test_json_report_records_recursive_success_in_deterministic_order(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("Zulu.PDF", "section/架空資料.pdf"))
+    output_dir = tmp_path / "output"
+    report_path = tmp_path / "reports" / "結果.json"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    raw_report = report_path.read_bytes()
+    assert exit_code == 0
+    assert raw_report.endswith(b"\n")
+    assert "架空資料.pdf".encode() in raw_report
+    assert b"\\u67b6" not in raw_report
+    assert str(tmp_path).encode() not in raw_report
+    assert _read_json_report(report_path) == {
+        "schema_version": 1,
+        "summary": {
+            "total": 2,
+            "succeeded": 2,
+            "failed": 0,
+            "skipped": 0,
+        },
+        "exit_code": 0,
+        "items": [
+            {
+                "input": "section/架空資料.pdf",
+                "output": "section/架空資料.md",
+                "status": "succeeded",
+                "error_category": None,
+                "message": None,
+            },
+            {
+                "input": "Zulu.PDF",
+                "output": "Zulu.md",
+                "status": "succeeded",
+                "error_category": None,
+                "message": None,
+            },
+        ],
+    }
+
+
+def test_json_report_records_partial_failure_and_skip(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("a.pdf", "b.pdf", "c.pdf"))
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "b.md").write_text("keep", encoding="utf-8")
+    report_path = tmp_path / "report.json"
+    converter = RecordingConverter(failing_names={"a.pdf"})
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    report = _read_json_report(report_path)
+    items = report["items"]
+    assert exit_code == report["exit_code"] == 1
+    assert str(tmp_path) not in report_path.read_text(encoding="utf-8")
+    assert "Traceback" not in report_path.read_text(encoding="utf-8")
+    assert report["summary"] == {
+        "total": 3,
+        "succeeded": 1,
+        "failed": 1,
+        "skipped": 1,
+    }
+    assert [item["input"] for item in items] == ["a.pdf", "b.pdf", "c.pdf"]  # type: ignore[index]
+    assert items[0]["status"] == "failed"  # type: ignore[index]
+    assert items[0]["error_category"] == "converter生成・変換処理関連"  # type: ignore[index]
+    assert items[0]["message"] == "RuntimeError: synthetic failure for a.pdf"  # type: ignore[index]
+    assert items[1] == {  # type: ignore[index]
+        "input": "b.pdf",
+        "output": "b.md",
+        "status": "skipped",
+        "error_category": None,
+        "message": "既存の出力を保持しました。",
+    }
+    assert items[2]["status"] == "succeeded"  # type: ignore[index]
+
+
+def test_json_report_records_all_factory_failures(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("a.pdf", "b.pdf"))
+    report_path = tmp_path / "report.json"
+
+    def failing_factory(do_table_structure: bool) -> FakeConverter:
+        raise RuntimeError("synthetic factory failure")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=failing_factory,
+    )
+
+    report = _read_json_report(report_path)
+    assert exit_code == report["exit_code"] == 1
+    assert report["summary"] == {
+        "total": 2,
+        "succeeded": 0,
+        "failed": 2,
+        "skipped": 0,
+    }
+    assert [item["status"] for item in report["items"]] == [  # type: ignore[index]
+        "failed",
+        "failed",
+    ]
+
+
+def test_json_report_records_all_skipped_without_converter(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "one.md").write_text("keep", encoding="utf-8")
+    report_path = tmp_path / "report.json"
+
+    def unexpected_factory(do_table_structure: bool) -> FakeConverter:
+        raise AssertionError("converter must not be built")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=unexpected_factory,
+    )
+
+    report = _read_json_report(report_path)
+    assert exit_code == report["exit_code"] == 0
+    assert report["summary"] == {
+        "total": 1,
+        "succeeded": 0,
+        "failed": 0,
+        "skipped": 1,
+    }
+    assert report["items"][0]["status"] == "skipped"  # type: ignore[index]
+
+
+def test_json_report_records_empty_filtered_result(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("ignored.pdf",))
+    report_path = input_dir / "reports" / "empty.json"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(input_dir / "output"),
+            "--include",
+            "selected/*.pdf",
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 0
+    assert _read_json_report(report_path) == {
+        "schema_version": 1,
+        "summary": {
+            "total": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+        },
+        "exit_code": 0,
+        "items": [],
+    }
+
+
+def test_json_report_only_contains_files_selected_by_filters(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(
+        input_dir,
+        ("docs/keep.pdf", "docs/excluded.pdf", "other/ignored.pdf"),
+    )
+    report_path = tmp_path / "report.json"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--recursive",
+            "--include",
+            "docs/*.pdf",
+            "--exclude",
+            "**/excluded.pdf",
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    report = _read_json_report(report_path)
+    assert exit_code == 0
+    assert [item["input"] for item in report["items"]] == ["docs/keep.pdf"]  # type: ignore[index]
+
+
+def test_json_report_replaces_existing_file(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    report_path = tmp_path / "report.json"
+    report_path.write_text("old report", encoding="utf-8")
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 0
+    assert _read_json_report(report_path)["schema_version"] == 1
+
+
+def test_json_report_directory_target_fails_safely(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    report_path = tmp_path / "report"
+    report_path.mkdir()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 2
+    assert stderr.strip() == "JSONレポートを書き込めませんでした。"
+    assert str(tmp_path) not in stderr
+    assert "Traceback" not in stderr
+
+
+def test_json_report_parent_creation_failure_is_safe(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    report_parent = tmp_path / "unwritable"
+    report_path = report_parent / "report.json"
+    original_mkdir = Path.mkdir
+
+    def selective_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        if path == report_parent:
+            raise PermissionError("synthetic denied")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", selective_mkdir)
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 2
+    assert not report_path.exists()
+    assert stderr.strip() == "JSONレポートを書き込めませんでした。"
+    assert str(tmp_path) not in stderr
+
+
+def test_json_report_atomic_replace_failure_preserves_existing_file(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    report_path = tmp_path / "report.json"
+    report_path.write_text("original", encoding="utf-8")
+    original_replace = Path.replace
+
+    def failing_replace(path: Path, target: Path) -> Path:
+        if target == report_path:
+            raise OSError("synthetic replace failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 2
+    assert report_path.read_text(encoding="utf-8") == "original"
+    assert list(tmp_path.glob(".report.json.*.tmp")) == []
+    assert stderr.strip() == "JSONレポートを書き込めませんでした。"
+    assert str(tmp_path) not in stderr
+    assert "Traceback" not in stderr
