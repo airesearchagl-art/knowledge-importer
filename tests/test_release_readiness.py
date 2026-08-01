@@ -153,6 +153,23 @@ def test_readme_documents_every_public_batch_option() -> None:
     assert version("knowledge-importer") == "0.1.0"
 
 
+def test_public_release_gate_documents_keep_human_decisions_explicit() -> None:
+    readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+    checklist = (REPOSITORY_ROOT / "RELEASE_CHECKLIST.md").read_text(encoding="utf-8")
+    license_review = (REPOSITORY_ROOT / "THIRD_PARTY_LICENSES_REVIEW.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md)" in readme
+    assert "[Third-party License Metadata Review](THIRD_PARTY_LICENSES_REVIEW.md)" in readme
+    assert "判定: **公開準備不可**" in checklist
+    assert "project license" in checklist
+    assert "real Docling" in checklist
+    assert "法的判断を行いません" in license_review
+    assert "docling" in license_review
+    assert "unknown" in license_review
+
+
 def test_integrated_batch_reports_and_quality_warning_smoke(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

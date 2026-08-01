@@ -251,10 +251,10 @@ uv build
 
 - PDFの複雑な段組み、表、数式ではMarkdownの再現性に差が出ます。初期版では表構造推論を無効化しています。
 - `do_ocr=False` のため、OCRされていない画像PDFやテキスト層が欠落・破損したPDFからは本文を抽出できません。
-- Docling本体や必要なモデル成果物がcacheされていない完全オフライン環境では、依存関係のinstallや実変換を開始できない場合があります。
+- wheel本体は依存を含まないため、完全offline installにはDoclingとtransitive dependencyのwheelを事前にcacheする必要があります。実変換には、さらにDoclingが要求するmodel artifactの事前cacheが必要です。どちらかが不足する環境ではinstallまたは変換を開始できません。
 - 実資料、実案件名、実会社名、実個人名をリポジトリへ追加しないでください。
 - `input/`、`output/`、`logs/` の実ファイルはGit管理対象外です。
 
 ## ライセンス
 
-プロジェクトのライセンスは未決定です。方針が決まるまで `LICENSE` は追加しません。
+プロジェクトのライセンスは未決定です。方針が決まるまで `LICENSE` とpackage license metadataは追加せず、tag、GitHub Release、PyPIなどへの公開を行いません。公開前の確認事項は [v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md) と [Third-party License Metadata Review](THIRD_PARTY_LICENSES_REVIEW.md) を参照してください。
