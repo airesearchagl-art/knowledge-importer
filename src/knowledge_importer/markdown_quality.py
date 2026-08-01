@@ -39,6 +39,20 @@ class MarkdownQualityResult:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeQualityWarning:
+    """One safe, document-independent warning for generated Markdown."""
+
+    category: str
+    reason: str
+
+
+# Runtime inputs can legitimately be much shorter than the synthetic fixture used
+# by the detailed regression suite. Forty visible characters only flags outputs
+# that are likely empty or severely truncated, and never changes conversion status.
+RUNTIME_SHORT_OUTPUT_THRESHOLD = 40
+
+
 _HEADING_PATTERN = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*#*\s*$")
 _BULLET_PATTERN = re.compile(r"^\s*[-*+]\s+(.+?)\s*$")
 _TABLE_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
@@ -48,6 +62,11 @@ _POSIX_ABSOLUTE_PATH = re.compile(r"(?<![\w/:])/(?:[^/\s]+/)+[^/\s]*")
 
 def _normalise(value: str) -> str:
     return " ".join(value.split()).casefold()
+
+
+def _visible_character_count(markdown: str) -> int:
+    visible_text = re.sub(r"[#|*_`~>\-\[\]()]", " ", markdown)
+    return len(_normalise(visible_text))
 
 
 def _missing_values(markdown: str, expected: tuple[str, ...]) -> list[str]:
@@ -64,8 +83,7 @@ def _metric(name: str, missing: list[str], label: str) -> QualityMetricResult:
 def _check_minimum_length(
     markdown: str, expectation: MarkdownQualityExpectation
 ) -> QualityMetricResult:
-    visible_text = re.sub(r"[#|*_`~>\-\[\]()]", " ", markdown)
-    character_count = len(_normalise(visible_text))
+    character_count = _visible_character_count(markdown)
     passed = character_count >= expectation.minimum_characters
     return QualityMetricResult(
         "minimum_length",
@@ -177,6 +195,31 @@ def _check_contamination(markdown: str) -> QualityMetricResult:
             f"unwanted content: {', '.join(findings)}",
         )
     return QualityMetricResult("contamination", True, "unwanted content: none")
+
+
+def evaluate_runtime_quality_warnings(
+    markdown: str,
+    *,
+    short_output_threshold: int = RUNTIME_SHORT_OUTPUT_THRESHOLD,
+) -> tuple[RuntimeQualityWarning, ...]:
+    """Return deterministic warnings that do not require document expectations."""
+
+    character_count = _visible_character_count(markdown)
+    warnings: list[RuntimeQualityWarning] = []
+    if character_count == 0:
+        warnings.append(RuntimeQualityWarning("empty-output", "Markdown出力が空"))
+    elif character_count < short_output_threshold:
+        warnings.append(RuntimeQualityWarning("short-output", "Markdown出力が極端に短い"))
+    if _WINDOWS_ABSOLUTE_PATH.search(markdown) or _POSIX_ABSOLUTE_PATH.search(markdown):
+        warnings.append(RuntimeQualityWarning("absolute-path", "絶対パスらしい文字列を検出"))
+    if "traceback (most recent call last)" in markdown.casefold():
+        warnings.append(RuntimeQualityWarning("traceback", "tracebackらしい文字列を検出"))
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Cs"} and character not in "\n\r\t"
+        for character in markdown
+    ):
+        warnings.append(RuntimeQualityWarning("control-character", "Unicode制御文字を検出"))
+    return tuple(warnings)
 
 
 def evaluate_markdown_quality(

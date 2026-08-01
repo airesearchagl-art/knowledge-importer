@@ -37,6 +37,7 @@ uv run knowledge-importer convert .\input --output .\output --recursive --includ
 uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json
 uv run knowledge-importer convert .\input --output .\output --report-csv .\reports\batch-result.csv
 uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json --report-csv .\reports\batch-result.csv
+uv run knowledge-importer convert .\input --output .\output --quality-warnings
 ```
 
 単一PDF変換では、既存出力は `--force` なしでは上書きせずエラーにします。一括変換では、既存のMarkdownファイルを `--force` なしで安全にスキップし、`--force` 指定時だけ再生成して上書きします。ログは `logs/knowledge-importer.log` に保存します。
@@ -142,6 +143,18 @@ uv run ruff format --check .
 Doclingの表構造推論あり・なしの比較結果は [Docling表構造モード比較](docs/converter-comparison.md) を参照してください。
 
 ### Markdown品質の回帰評価
+
+通常の単一PDF・一括変換では、`--quality-warnings`を明示した場合だけ、今回生成または`--force`で再生成したMarkdownに基礎品質検査を実行します。空出力、可視文字40文字未満の極端に短い出力、Windows/POSIX絶対パス、tracebackらしい文字列、Unicode制御文字を検出すると、安全な分類と理由をstderrへ表示します。
+
+```text
+警告: ファイル=section/a.pdf 分類=short-output 理由=Markdown出力が極端に短い
+```
+
+40文字は文書固有の期待値を持たないruntime検査で大幅な欠落を拾うための保守的なwarning閾値です。短い正常文書を誤検知する可能性がある補助機能であり、warningがあっても変換成功扱い、summary、終了コードは変わりません。skipped、変換失敗、include/exclude対象外のMarkdownは検査しません。warning情報はBatchResult、JSON schema version 1、CSVへ追加しません。
+
+このruntime検査は、見出し階層、表構造、主要語句、ページ境界、意味的正確性、視覚的忠実度など、文書固有の正解を必要とする品質を判定しません。
+
+### 合成fixtureによる詳細回帰評価
 
 `tests/test_markdown_quality.py` は、実資料やDocling実推論を使わず、合成PDFと合成Markdownだけで変換結果の主要構造を評価します。対象は、見出し階層、本文の主要語句、箇条書き、Markdown表、ページ境界前後の本文、空または極端に短い出力、絶対パス・traceback・制御文字の混入です。
 
