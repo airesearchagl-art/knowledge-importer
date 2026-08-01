@@ -38,6 +38,8 @@ uv run knowledge-importer convert .\input --output .\output --report-json .\repo
 uv run knowledge-importer convert .\input --output .\output --report-csv .\reports\batch-result.csv
 uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json --report-csv .\reports\batch-result.csv
 uv run knowledge-importer convert .\input --output .\output --quality-warnings
+uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --quality-report-json .\reports\sample-quality.json
+uv run knowledge-importer convert .\input --output .\output --quality-report-json .\reports\quality.json --quality-warnings
 ```
 
 単一PDF変換では、既存出力は `--force` なしでは上書きせずエラーにします。一括変換では、既存のMarkdownファイルを `--force` なしで安全にスキップし、`--force` 指定時だけ再生成して上書きします。ログは `logs/knowledge-importer.log` に保存します。
@@ -153,6 +155,47 @@ Doclingの表構造推論あり・なしの比較結果は [Docling表構造モ�
 40文字は文書固有の期待値を持たないruntime検査で大幅な欠落を拾うための保守的なwarning閾値です。短い正常文書を誤検知する可能性がある補助機能であり、warningがあっても変換成功扱い、summary、終了コードは変わりません。skipped、変換失敗、include/exclude対象外のMarkdownは検査しません。warning情報はBatchResult、JSON schema version 1、CSVへ追加しません。
 
 このruntime検査は、見出し階層、表構造、主要語句、ページ境界、意味的正確性、視覚的忠実度など、文書固有の正解を必要とする品質を判定しません。
+
+#### 独立Markdown品質JSONレポート
+
+`--quality-report-json PATH`を指定すると、単一PDF・一括変換のどちらでもruntime品質検査を有効化し、今回新規生成または`--force`で再生成して検査した全Markdownを独立したJSONへ記録します。レポートだけを指定した場合はstderrへ品質warningを表示しません。`--quality-warnings`を併用すると、同じ1回の読み取り・評価結果をstderrとレポートで共有します。
+
+```json
+{
+  "report_type": "markdown-quality",
+  "schema_version": 1,
+  "summary": {
+    "checked": 2,
+    "passed": 1,
+    "warned": 1
+  },
+  "items": [
+    {
+      "input": "section/a.pdf",
+      "output": "section/a.md",
+      "status": "passed",
+      "warnings": []
+    },
+    {
+      "input": "section/b.pdf",
+      "output": "section/b.md",
+      "status": "warned",
+      "warnings": [
+        {
+          "category": "short-output",
+          "message": "Markdown出力が極端に短い"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`passed`はwarningなし、`warned`は1件以上のwarningありを示します。UTF-8読み取りに失敗した場合は、変換成功扱いを維持したまま、例外本文を含まない`quality-read-error`として記録します。batchの入出力は各ルートからの相対POSIXパス、単一PDFではファイル名だけを記録し、絶対パス、ユーザー名、traceback本文、時刻などは含めません。
+
+skipped、変換失敗、include/exclude対象外はitemsへ含めません。検査対象が0件でもsummaryがすべて0の空レポートを生成します。品質warningは変換成否、通常summary、BatchResult、終了コードへ影響せず、既存Batch Report JSON schema version 1およびCSVへも追加されません。`--report-json`、`--report-csv`との同時指定は可能ですが、品質レポートには既存レポートおよび生成Markdownと異なる出力先が必要です。
+
+品質レポートは同一ディレクトリの一時ファイルから原子的に置換します。書き込みに失敗した場合は既存ファイルを保持し、安全な固定メッセージをstderrへ表示して終了コード`2`とします。このレポートも見出し・表・意味・視覚的忠実度など、文書固有の正解は評価しません。
 
 ### 合成fixtureによる詳細回帰評価
 

@@ -88,6 +88,7 @@ def test_convert_help_describes_directory_options(capsys: object) -> None:
     assert "--report-json" in help_text
     assert "--report-csv" in help_text
     assert "--quality-warnings" in help_text
+    assert "--quality-report-json" in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:
@@ -2178,3 +2179,561 @@ def test_quality_read_failure_is_safe_warning_without_status_change(
     )
     assert str(tmp_path) not in stderr
     assert "synthetic private path detail" not in stderr
+
+
+def test_single_quality_report_records_passed_without_stderr_warning(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    output_path = tmp_path / "one.md"
+    report_path = tmp_path / "quality.json"
+    converter = ContentConverter(
+        {"one.pdf": "# Synthetic note\n\nThis output has enough visible content to pass.\n"}
+    )
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().err == ""  # type: ignore[attr-defined]
+    assert converter.inputs == [input_path]
+    assert _read_json_report(report_path) == {
+        "report_type": "markdown-quality",
+        "schema_version": 1,
+        "summary": {"checked": 1, "passed": 1, "warned": 0},
+        "items": [
+            {
+                "input": "one.pdf",
+                "output": "one.md",
+                "status": "passed",
+                "warnings": [],
+            }
+        ],
+    }
+
+
+def test_omitted_quality_report_option_does_not_call_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from knowledge_importer import cli as cli_module
+
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+
+    def unexpected_writer(path: Path, report: object) -> None:
+        raise AssertionError("quality report writer must remain opt-in")
+
+    monkeypatch.setattr(cli_module, "write_quality_report", unexpected_writer)
+
+    exit_code = run(
+        ["convert", str(input_path), "--output", str(tmp_path / "one.md")],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 0
+
+
+def test_quality_report_and_stderr_share_one_read_and_evaluation(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from knowledge_importer import cli as cli_module
+
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    output_path = tmp_path / "one.md"
+    report_path = tmp_path / "quality.json"
+    converter = ContentConverter({"one.pdf": "tiny"})
+    original_read_text = Path.read_text
+    original_evaluate = cli_module.evaluate_runtime_quality_warnings
+    read_count = 0
+    evaluation_count = 0
+
+    def counting_read(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal read_count
+        if path == output_path:
+            read_count += 1
+        return original_read_text(path, *args, **kwargs)
+
+    def counting_evaluate(markdown: str) -> tuple[object, ...]:
+        nonlocal evaluation_count
+        evaluation_count += 1
+        return original_evaluate(markdown)
+
+    monkeypatch.setattr(Path, "read_text", counting_read)
+    monkeypatch.setattr(cli_module, "evaluate_runtime_quality_warnings", counting_evaluate)
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--quality-warnings",
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    report = _read_json_report(report_path)
+    assert exit_code == 0
+    assert read_count == 1
+    assert evaluation_count == 1
+    assert converter.inputs == [input_path]
+    assert report["items"][0]["status"] == "warned"  # type: ignore[index]
+    assert report["items"][0]["warnings"] == [  # type: ignore[index]
+        {"category": "short-output", "message": "Markdown出力が極端に短い"}
+    ]
+    assert "ファイル=one.pdf 分類=short-output" in capsys.readouterr().err  # type: ignore[attr-defined]
+
+
+def test_batch_quality_report_records_checked_files_in_relative_order(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("section/z.pdf", "section/a.pdf", "ignored.pdf"))
+    report_path = tmp_path / "quality.json"
+    converter = ContentConverter(
+        {
+            "a.pdf": "Synthetic Markdown output with enough visible content to pass.",
+            "z.pdf": "tiny",
+        }
+    )
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--recursive",
+            "--include",
+            "section/*.pdf",
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    report = _read_json_report(report_path)
+    assert exit_code == 0
+    assert capsys.readouterr().err == ""  # type: ignore[attr-defined]
+    assert report["summary"] == {"checked": 2, "passed": 1, "warned": 1}
+    assert [item["input"] for item in report["items"]] == [  # type: ignore[index]
+        "section/a.pdf",
+        "section/z.pdf",
+    ]
+    assert [item["output"] for item in report["items"]] == [  # type: ignore[index]
+        "section/a.md",
+        "section/z.md",
+    ]
+    assert "ignored.pdf" not in report_path.read_text(encoding="utf-8")
+
+
+def test_quality_report_preserves_fixed_warning_order_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    report_path = tmp_path / "quality.json"
+    markdown = (
+        "Synthetic content long enough for the runtime threshold.\n"
+        "C:\\Users\\private\\one.pdf and /srv/private/one.pdf\n"
+        "Traceback (most recent call last): private detail\n"
+        "\u202e"
+    )
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(tmp_path / "one.md"),
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure: ContentConverter({"one.pdf": markdown}),
+    )
+
+    report_text = report_path.read_text(encoding="utf-8")
+    warnings = _read_json_report(report_path)["items"][0]["warnings"]  # type: ignore[index]
+    assert exit_code == 0
+    assert [warning["category"] for warning in warnings] == [
+        "absolute-path",
+        "traceback",
+        "control-character",
+    ]
+    assert sum(warning["category"] == "absolute-path" for warning in warnings) == 1
+    assert "private detail" not in report_text
+    assert str(tmp_path) not in report_text
+
+
+def test_quality_report_excludes_skipped_and_failed_items(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("failed.pdf", "passed.pdf", "skipped.pdf"))
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "skipped.md").write_text("existing", encoding="utf-8")
+    report_path = tmp_path / "quality.json"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure: RecordingConverter(
+            failing_names={"failed.pdf"}
+        ),
+    )
+
+    report = _read_json_report(report_path)
+    assert exit_code == 1
+    assert report["summary"] == {"checked": 1, "passed": 0, "warned": 1}
+    assert [item["input"] for item in report["items"]] == ["passed.pdf"]  # type: ignore[index]
+
+
+@pytest.mark.parametrize("mode", ["filtered", "no-pdf", "skipped", "failed"])
+def test_batch_quality_report_writes_empty_document_when_nothing_is_checked(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    output_dir = tmp_path / "output"
+    report_path = tmp_path / "quality.json"
+    extra_args: list[str] = []
+    converter_factory = fake_converter_factory
+    expected_exit_code = 0
+
+    def failing_converter_factory(do_table_structure: bool = False) -> RecordingConverter:
+        return RecordingConverter(failing_names={"one.pdf"})
+
+    if mode == "filtered":
+        _create_pdf_tree(input_dir, ("one.pdf",))
+        extra_args = ["--include", "missing/*.pdf"]
+    elif mode == "no-pdf":
+        expected_exit_code = 2
+    elif mode == "skipped":
+        _create_pdf_tree(input_dir, ("one.pdf",))
+        output_dir.mkdir()
+        (output_dir / "one.md").write_text("existing", encoding="utf-8")
+    else:
+        _create_pdf_tree(input_dir, ("one.pdf",))
+        converter_factory = failing_converter_factory
+        expected_exit_code = 1
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            *extra_args,
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=converter_factory,
+    )
+
+    assert exit_code == expected_exit_code
+    assert _read_json_report(report_path) == {
+        "report_type": "markdown-quality",
+        "schema_version": 1,
+        "summary": {"checked": 0, "passed": 0, "warned": 0},
+        "items": [],
+    }
+
+
+def test_single_conversion_failure_writes_empty_quality_report(tmp_path: Path) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    report_path = tmp_path / "quality.json"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(tmp_path / "one.md"),
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure: RecordingConverter(failing_names={"one.pdf"}),
+    )
+
+    assert exit_code == 1
+    assert _read_json_report(report_path)["items"] == []
+
+
+def test_single_input_validation_failure_does_not_write_quality_report(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "quality.json"
+
+    exit_code = run(
+        [
+            "convert",
+            str(tmp_path / "missing.pdf"),
+            "--output",
+            str(tmp_path / "missing.md"),
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 2
+    assert not report_path.exists()
+
+
+def test_quality_read_error_is_safe_in_report_without_stderr_warning(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    output_path = tmp_path / "one.md"
+    report_path = tmp_path / "quality.json"
+    original_read_text = Path.read_text
+
+    def failing_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == output_path:
+            raise PermissionError("private local detail")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    report_text = report_path.read_text(encoding="utf-8")
+    report = json.loads(report_text)
+    assert exit_code == 0
+    assert capsys.readouterr().err == ""  # type: ignore[attr-defined]
+    assert report["items"][0]["status"] == "warned"
+    assert report["items"][0]["warnings"] == [
+        {"category": "quality-read-error", "message": "Markdown出力を読み取れない"}
+    ]
+    assert str(tmp_path) not in report_text
+    assert "private local detail" not in report_text
+
+
+@pytest.mark.parametrize("existing_option", ["--report-json", "--report-csv"])
+def test_quality_report_rejects_existing_report_path_collision(
+    tmp_path: Path,
+    capsys: object,
+    existing_option: str,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    report_path = tmp_path / "RÉPORT.json"
+    equivalent_path = tmp_path / "re\u0301port.JSON"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--quality-report-json",
+            str(report_path),
+            existing_option,
+            str(equivalent_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 2
+    assert "品質レポートと変換結果レポート" in capsys.readouterr().err  # type: ignore[attr-defined]
+    assert not report_path.exists()
+
+
+def test_quality_report_rejects_single_and_batch_markdown_path_collision(
+    tmp_path: Path,
+) -> None:
+    single_input = tmp_path / "one.pdf"
+    single_input.write_bytes(b"%PDF-1.4\n")
+    single_output = tmp_path / "one.md"
+
+    single_exit = run(
+        [
+            "convert",
+            str(single_input),
+            "--output",
+            str(single_output),
+            "--quality-report-json",
+            str(single_output),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("section/a.pdf",))
+    output_dir = tmp_path / "output"
+    batch_exit = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--recursive",
+            "--quality-report-json",
+            str(output_dir / "SECTION" / "A.MD"),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert single_exit == 2
+    assert batch_exit == 2
+    assert not single_output.exists()
+    assert not (output_dir / "section" / "a.md").exists()
+
+
+def test_quality_report_coexists_with_unchanged_batch_json_and_csv(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    output_dir = tmp_path / "output"
+    quality_path = tmp_path / "quality.json"
+    batch_path = tmp_path / "batch.json"
+    csv_path = tmp_path / "batch.csv"
+    converter = ContentConverter({"one.pdf": "tiny"})
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--quality-report-json",
+            str(quality_path),
+            "--report-json",
+            str(batch_path),
+            "--report-csv",
+            str(csv_path),
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    batch_report = _read_json_report(batch_path)
+    csv_rows = _read_csv_report(csv_path)
+    assert exit_code == 0
+    assert converter.inputs == [input_dir / "one.pdf"]
+    assert batch_report == {
+        "schema_version": 1,
+        "summary": {"total": 1, "succeeded": 1, "failed": 0, "skipped": 0},
+        "exit_code": 0,
+        "items": [
+            {
+                "input": "one.pdf",
+                "output": "one.md",
+                "status": "succeeded",
+                "error_category": None,
+                "message": None,
+            }
+        ],
+    }
+    assert csv_rows == [
+        {
+            "input": "one.pdf",
+            "output": "one.md",
+            "status": "succeeded",
+            "error_category": "",
+            "message": "",
+        }
+    ]
+    assert "quality" not in batch_path.read_text(encoding="utf-8").casefold()
+    assert "quality" not in csv_path.read_text(encoding="utf-8-sig").casefold()
+
+
+def test_quality_report_write_failure_is_safe_and_returns_two(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    report_path = tmp_path / "quality"
+    report_path.mkdir()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(tmp_path / "one.md"),
+            "--quality-report-json",
+            str(report_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 2
+    assert stderr.strip() == "品質レポートを書き込めませんでした。"
+    assert str(tmp_path) not in stderr
+    assert "Traceback" not in stderr
+
+
+def test_quality_report_failure_still_writes_existing_batch_reports(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("one.pdf",))
+    quality_path = tmp_path / "quality"
+    quality_path.mkdir()
+    batch_path = tmp_path / "batch.json"
+    csv_path = tmp_path / "batch.csv"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--quality-report-json",
+            str(quality_path),
+            "--report-json",
+            str(batch_path),
+            "--report-csv",
+            str(csv_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    assert exit_code == 2
+    assert _read_json_report(batch_path)["exit_code"] == 2
+    assert _read_csv_report(csv_path)[0]["status"] == "succeeded"
+    assert capsys.readouterr().err.strip() == "品質レポートを書き込めませんでした。"  # type: ignore[attr-defined]
