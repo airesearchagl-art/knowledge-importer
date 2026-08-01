@@ -1,6 +1,5 @@
 import argparse
 import csv
-import json
 import logging
 import re
 import sys
@@ -20,6 +19,7 @@ from knowledge_importer.converter import (
     convert_file,
     validate_request,
 )
+from knowledge_importer.json_writer import write_json_atomically
 from knowledge_importer.markdown_quality import (
     RuntimeQualityWarning,
     evaluate_runtime_quality_warnings,
@@ -29,6 +29,11 @@ from knowledge_importer.models import (
     InputValidationError,
     KnowledgeImporterError,
     OutputExistsError,
+)
+from knowledge_importer.quality_report import (
+    QualityReport,
+    QualityReportItem,
+    write_quality_report,
 )
 
 LOGGER = logging.getLogger("knowledge_importer")
@@ -161,7 +166,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="生成Markdownの基礎品質warningをstderrへ表示",
     )
+    convert_parser.add_argument(
+        "--quality-report-json",
+        type=Path,
+        metavar="PATH",
+        help="生成Markdownの基礎品質検査結果を独立JSONファイルへ出力",
+    )
     return parser
+
+
+def _path_comparison_key(path: Path) -> str:
+    resolved = path.resolve(strict=False)
+    return unicodedata.normalize("NFC", str(resolved)).casefold()
+
+
+def _paths_are_equal(first: Path, second: Path) -> bool:
+    return _path_comparison_key(first) == _path_comparison_key(second)
 
 
 def run(
@@ -174,10 +194,19 @@ def run(
         if (
             args.report_json is not None
             and args.report_csv is not None
-            and args.report_json.resolve(strict=False) == args.report_csv.resolve(strict=False)
+            and _paths_are_equal(args.report_json, args.report_csv)
         ):
             print(
                 "エラー: JSONレポートとCSVレポートには異なる出力先を指定してください",
+                file=sys.stderr,
+            )
+            return 2
+        if args.quality_report_json is not None and any(
+            report_path is not None and _paths_are_equal(args.quality_report_json, report_path)
+            for report_path in (args.report_json, args.report_csv)
+        ):
+            print(
+                "エラー: 品質レポートと変換結果レポートには異なる出力先を指定してください",
                 file=sys.stderr,
             )
             return 2
@@ -192,6 +221,7 @@ def run(
             report_json=args.report_json,
             report_csv=args.report_csv,
             quality_warnings=args.quality_warnings,
+            quality_report_json=args.quality_report_json,
             converter_factory=converter_factory,
         )
 
@@ -209,6 +239,15 @@ def run(
         )
         return 2
 
+    if args.quality_report_json is not None and _paths_are_equal(
+        args.quality_report_json, args.output
+    ):
+        print(
+            "エラー: 品質レポートとMarkdown出力には異なる出力先を指定してください",
+            file=sys.stderr,
+        )
+        return 2
+
     request = ConversionRequest(
         input_path=args.input,
         output_path=args.output,
@@ -219,6 +258,7 @@ def run(
         converter_factory=converter_factory,
         do_table_structure=args.table_structure,
         quality_warnings=args.quality_warnings,
+        quality_report_json=args.quality_report_json,
     )
 
 
@@ -230,6 +270,7 @@ def _convert_request(
     do_table_structure: bool = False,
     batch: bool = False,
     quality_warnings: bool = False,
+    quality_report_json: Path | None = None,
 ) -> int:
     LOGGER.info(
         "conversion_start input=%s output=%s",
@@ -237,8 +278,10 @@ def _convert_request(
         request.output_path,
     )
 
+    validation_succeeded = False
     try:
         validate_request(request)
+        validation_succeeded = True
         if converter is None:
             if converter_factory is None:
                 raise RuntimeError("converterまたはconverter factoryが必要です")
@@ -253,6 +296,8 @@ def _convert_request(
         )
         prefix = f"{request.input_path}: " if batch else ""
         print(f"エラー: {prefix}{exc}", file=sys.stderr)
+        if validation_succeeded and quality_report_json is not None:
+            _write_quality_report_safely(quality_report_json, QualityReport(()))
         return 2
     except Exception as exc:  # noqa: BLE001 - CLI boundary must produce a stable exit code.
         LOGGER.exception(
@@ -268,10 +313,19 @@ def _convert_request(
             )
         else:
             print(f"変換に失敗しました ({type(exc).__name__}): {exc}", file=sys.stderr)
+        if (
+            validation_succeeded
+            and quality_report_json is not None
+            and not _write_quality_report_safely(quality_report_json, QualityReport(()))
+        ):
+            return 2
         return 1
 
-    if quality_warnings:
-        _warn_for_markdown_quality(request.output_path, request.input_path.name)
+    quality_result: tuple[RuntimeQualityWarning, ...] = ()
+    if quality_warnings or quality_report_json is not None:
+        quality_result = _read_markdown_quality(request.output_path)
+        if quality_warnings:
+            _print_quality_warnings(request.input_path.name, quality_result)
 
     LOGGER.info(
         "conversion_end success=true input=%s output=%s exception_type=none",
@@ -279,6 +333,18 @@ def _convert_request(
         request.output_path,
     )
     print(f"変換しました: {request.output_path}")
+    if quality_report_json is not None:
+        report = QualityReport(
+            (
+                QualityReportItem(
+                    input_name=request.input_path.name,
+                    output_name=request.output_path.name,
+                    warnings=quality_result,
+                ),
+            )
+        )
+        if not _write_quality_report_safely(quality_report_json, report):
+            return 2
     return 0
 
 
@@ -298,20 +364,35 @@ def _print_quality_warning(file_name: str, warning: RuntimeQualityWarning) -> No
     )
 
 
-def _warn_for_markdown_quality(markdown_path: Path, file_name: str) -> None:
+def _print_quality_warnings(file_name: str, warnings: tuple[RuntimeQualityWarning, ...]) -> None:
+    for warning in warnings:
+        _print_quality_warning(file_name, warning)
+
+
+def _read_markdown_quality(markdown_path: Path) -> tuple[RuntimeQualityWarning, ...]:
     try:
         markdown = markdown_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        _print_quality_warning(
-            file_name,
+        return (
             RuntimeQualityWarning(
                 "quality-read-error",
                 "Markdown出力を読み取れない",
             ),
         )
-        return
-    for warning in evaluate_runtime_quality_warnings(markdown):
-        _print_quality_warning(file_name, warning)
+    return evaluate_runtime_quality_warnings(markdown)
+
+
+def _write_quality_report_safely(report_path: Path, report: QualityReport) -> bool:
+    try:
+        write_quality_report(report_path, report)
+    except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+        LOGGER.error(
+            "quality_report_write_failed exception_type=%s",
+            type(exc).__name__,
+        )
+        print("品質レポートを書き込めませんでした。", file=sys.stderr)
+        return False
+    return True
 
 
 def _relative_sort_key(path: Path, input_dir: Path) -> tuple[str, str]:
@@ -612,34 +693,10 @@ def _write_batch_report(
     *,
     exit_code: int | None = None,
 ) -> None:
-    if report_path.is_dir():
-        raise IsADirectoryError
-
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
+    write_json_atomically(
+        report_path,
         _batch_result_payload(result, exit_code=exit_code),
-        ensure_ascii=False,
-        indent=2,
     )
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            prefix=f".{report_path.name}.",
-            suffix=".tmp",
-            dir=report_path.parent,
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            temporary_file.write(f"{payload}\n")
-        temporary_path.replace(report_path)
-    except Exception:
-        if temporary_path is not None:
-            with suppress(OSError):
-                temporary_path.unlink(missing_ok=True)
-        raise
 
 
 def _write_batch_csv(report_path: Path, result: BatchResult) -> None:
@@ -695,8 +752,15 @@ def _write_requested_reports(
     *,
     report_json: Path | None,
     report_csv: Path | None,
+    quality_report_json: Path | None = None,
+    quality_report: QualityReport | None = None,
 ) -> bool:
     report_failed = False
+    if quality_report_json is not None and not _write_quality_report_safely(
+        quality_report_json,
+        quality_report if quality_report is not None else QualityReport(()),
+    ):
+        report_failed = True
     if report_csv is not None:
         try:
             _write_batch_csv(report_csv, result)
@@ -730,12 +794,16 @@ def _finish_batch(
     result: BatchResult,
     report_json: Path | None,
     report_csv: Path | None,
+    quality_report_json: Path | None,
+    quality_report: QualityReport,
 ) -> int:
     print(_format_batch_summary(result))
     report_failed = _write_requested_reports(
         result,
         report_json=report_json,
         report_csv=report_csv,
+        quality_report_json=quality_report_json,
+        quality_report=quality_report,
     )
     return 2 if report_failed else result.exit_code
 
@@ -765,7 +833,8 @@ def _convert_batch_request(
     input_name: str,
     output_name: str,
     quality_warnings: bool,
-) -> BatchFailure | None:
+    quality_report_enabled: bool,
+) -> tuple[BatchFailure | None, tuple[RuntimeQualityWarning, ...]]:
     LOGGER.info(
         "conversion_start input=%s output=%s",
         input_name,
@@ -784,10 +853,13 @@ def _convert_batch_request(
             type(exc.cause if isinstance(exc, _BatchConverterError) else exc).__name__,
         )
         _print_batch_failure(failure)
-        return failure
+        return failure, ()
 
-    if quality_warnings:
-        _warn_for_markdown_quality(request.output_path, input_name)
+    quality_result: tuple[RuntimeQualityWarning, ...] = ()
+    if quality_warnings or quality_report_enabled:
+        quality_result = _read_markdown_quality(request.output_path)
+        if quality_warnings:
+            _print_quality_warnings(input_name, quality_result)
 
     LOGGER.info(
         "conversion_end success=true input=%s output=%s exception_type=none",
@@ -795,7 +867,7 @@ def _convert_batch_request(
         output_name,
     )
     print(f"変換しました: {output_name}")
-    return None
+    return None, quality_result
 
 
 def _run_directory(
@@ -810,6 +882,7 @@ def _run_directory(
     report_json: Path | None,
     report_csv: Path | None,
     quality_warnings: bool,
+    quality_report_json: Path | None,
     converter_factory: Callable[[bool], Converter],
 ) -> int:
     try:
@@ -830,11 +903,13 @@ def _run_directory(
             type(exc).__name__,
         )
         print(f"エラー: 分類={exc.category.value} 理由={exc}", file=sys.stderr)
-        if report_csv is not None:
+        if report_csv is not None or quality_report_json is not None:
             _write_requested_reports(
                 BatchResult(()),
                 report_json=None,
                 report_csv=report_csv,
+                quality_report_json=quality_report_json,
+                quality_report=QualityReport(()),
             )
         return 2
     except _BatchSetupError as exc:
@@ -848,9 +923,19 @@ def _run_directory(
         print(f"エラー: 分類={exc.category.value} 理由={exc}", file=sys.stderr)
         return 2
 
+    if quality_report_json is not None and any(
+        _paths_are_equal(quality_report_json, request.output_path) for request in requests
+    ):
+        print(
+            "エラー: 品質レポートとMarkdown出力には異なる出力先を指定してください",
+            file=sys.stderr,
+        )
+        return 2
+
     pending_requests: list[ConversionRequest] = []
     skipped_requests: list[ConversionRequest] = []
     result_items: dict[Path, BatchResultItem] = {}
+    quality_items: list[QualityReportItem] = []
     for request in requests:
         if not force and request.output_path.is_file():
             skipped_requests.append(request)
@@ -905,7 +990,13 @@ def _run_directory(
                     failure=failure,
                 )
             result = BatchResult(tuple(result_items[request.input_path] for request in requests))
-            return _finish_batch(result, report_json, report_csv)
+            return _finish_batch(
+                result,
+                report_json,
+                report_csv,
+                quality_report_json,
+                QualityReport(()),
+            )
     else:
         converter = None
 
@@ -913,12 +1004,15 @@ def _run_directory(
     failures: list[BatchFailure] = []
     for request in pending_requests:
         assert converter is not None
-        failure = _convert_batch_request(
+        input_name = request.input_path.relative_to(input_dir).as_posix()
+        output_name = request.output_path.relative_to(output_dir).as_posix()
+        failure, quality_result = _convert_batch_request(
             request,
             converter,
-            input_name=request.input_path.relative_to(input_dir).as_posix(),
-            output_name=request.output_path.relative_to(output_dir).as_posix(),
+            input_name=input_name,
+            output_name=output_name,
             quality_warnings=quality_warnings,
+            quality_report_enabled=quality_report_json is not None,
         )
         if failure is None:
             success_count += 1
@@ -928,6 +1022,14 @@ def _run_directory(
                 output_dir,
                 BatchItemStatus.SUCCEEDED,
             )
+            if quality_report_json is not None:
+                quality_items.append(
+                    QualityReportItem(
+                        input_name=input_name,
+                        output_name=output_name,
+                        warnings=quality_result,
+                    )
+                )
         else:
             failures.append(failure)
             result_items[request.input_path] = _batch_result_item(
@@ -950,4 +1052,10 @@ def _run_directory(
         skipped_count,
     )
     result = BatchResult(tuple(result_items[request.input_path] for request in requests))
-    return _finish_batch(result, report_json, report_csv)
+    return _finish_batch(
+        result,
+        report_json,
+        report_csv,
+        quality_report_json,
+        QualityReport(tuple(quality_items)),
+    )
