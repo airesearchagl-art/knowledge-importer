@@ -6,9 +6,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen.canvas import Canvas
 
 from knowledge_importer.markdown_quality import (
+    RUNTIME_SHORT_OUTPUT_THRESHOLD,
     MarkdownQualityExpectation,
     MarkdownQualityResult,
     evaluate_markdown_quality,
+    evaluate_runtime_quality_warnings,
 )
 
 VALID_MARKDOWN = """\
@@ -192,3 +194,62 @@ def test_minor_whitespace_and_markdown_style_changes_do_not_fail() -> None:
     result = evaluate_markdown_quality(restyled, EXPECTATION)
 
     assert result.passed is True, _failure_message(result)
+
+
+def test_runtime_quality_accepts_normal_markdown_without_expectations() -> None:
+    markdown = "# Synthetic note\n\nThis fictional Markdown output is comfortably long enough.\n"
+
+    assert evaluate_runtime_quality_warnings(markdown) == ()
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected_category"),
+    [
+        pytest.param("", "empty-output", id="empty"),
+        pytest.param("# Tiny\n", "short-output", id="short"),
+        pytest.param(
+            "Synthetic content longer than the runtime threshold.\nC:\\Users\\sample\\file.pdf",
+            "absolute-path",
+            id="windows-path",
+        ),
+        pytest.param(
+            "Synthetic content longer than the runtime threshold.\n/srv/private/file.pdf",
+            "absolute-path",
+            id="posix-path",
+        ),
+        pytest.param(
+            "Synthetic content longer than the runtime threshold.\n"
+            "Traceback (most recent call last):",
+            "traceback",
+            id="traceback",
+        ),
+        pytest.param(
+            "Synthetic content longer than the runtime threshold.\n\u202e",
+            "control-character",
+            id="control-character",
+        ),
+    ],
+)
+def test_runtime_quality_reports_each_basic_category(
+    markdown: str,
+    expected_category: str,
+) -> None:
+    warnings = evaluate_runtime_quality_warnings(markdown)
+
+    assert expected_category in {warning.category for warning in warnings}
+
+
+def test_runtime_quality_warning_order_is_fixed_without_duplicate_categories() -> None:
+    markdown = (
+        "short C:\\one\\a.pdf /srv/two/b.pdf "
+        "Traceback (most recent call last): Traceback (most recent call last): \u202e\u202e"
+    )
+
+    warnings = evaluate_runtime_quality_warnings(markdown)
+
+    assert RUNTIME_SHORT_OUTPUT_THRESHOLD == 40
+    assert [warning.category for warning in warnings] == [
+        "absolute-path",
+        "traceback",
+        "control-character",
+    ]

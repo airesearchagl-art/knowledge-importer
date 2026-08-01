@@ -20,6 +20,10 @@ from knowledge_importer.converter import (
     convert_file,
     validate_request,
 )
+from knowledge_importer.markdown_quality import (
+    RuntimeQualityWarning,
+    evaluate_runtime_quality_warnings,
+)
 from knowledge_importer.models import (
     ConversionRequest,
     InputValidationError,
@@ -152,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="ディレクトリ一括変換の結果をCSVファイルへ出力",
     )
+    convert_parser.add_argument(
+        "--quality-warnings",
+        action="store_true",
+        help="生成Markdownの基礎品質warningをstderrへ表示",
+    )
     return parser
 
 
@@ -182,6 +191,7 @@ def run(
             exclude_patterns=args.exclude,
             report_json=args.report_json,
             report_csv=args.report_csv,
+            quality_warnings=args.quality_warnings,
             converter_factory=converter_factory,
         )
 
@@ -208,6 +218,7 @@ def run(
         request,
         converter_factory=converter_factory,
         do_table_structure=args.table_structure,
+        quality_warnings=args.quality_warnings,
     )
 
 
@@ -218,6 +229,7 @@ def _convert_request(
     converter_factory: Callable[[bool], Converter] | None = None,
     do_table_structure: bool = False,
     batch: bool = False,
+    quality_warnings: bool = False,
 ) -> int:
     LOGGER.info(
         "conversion_start input=%s output=%s",
@@ -258,6 +270,9 @@ def _convert_request(
             print(f"変換に失敗しました ({type(exc).__name__}): {exc}", file=sys.stderr)
         return 1
 
+    if quality_warnings:
+        _warn_for_markdown_quality(request.output_path, request.input_path.name)
+
     LOGGER.info(
         "conversion_end success=true input=%s output=%s exception_type=none",
         request.input_path,
@@ -269,6 +284,34 @@ def _convert_request(
 
 def _is_linked_directory(path: Path) -> bool:
     return path.is_symlink() or path.is_junction()
+
+
+def _print_quality_warning(file_name: str, warning: RuntimeQualityWarning) -> None:
+    LOGGER.warning(
+        "quality_warning file=%s category=%s",
+        file_name,
+        warning.category,
+    )
+    print(
+        f"警告: ファイル={file_name} 分類={warning.category} 理由={warning.reason}",
+        file=sys.stderr,
+    )
+
+
+def _warn_for_markdown_quality(markdown_path: Path, file_name: str) -> None:
+    try:
+        markdown = markdown_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        _print_quality_warning(
+            file_name,
+            RuntimeQualityWarning(
+                "quality-read-error",
+                "Markdown出力を読み取れない",
+            ),
+        )
+        return
+    for warning in evaluate_runtime_quality_warnings(markdown):
+        _print_quality_warning(file_name, warning)
 
 
 def _relative_sort_key(path: Path, input_dir: Path) -> tuple[str, str]:
@@ -721,6 +764,7 @@ def _convert_batch_request(
     *,
     input_name: str,
     output_name: str,
+    quality_warnings: bool,
 ) -> BatchFailure | None:
     LOGGER.info(
         "conversion_start input=%s output=%s",
@@ -742,6 +786,9 @@ def _convert_batch_request(
         _print_batch_failure(failure)
         return failure
 
+    if quality_warnings:
+        _warn_for_markdown_quality(request.output_path, input_name)
+
     LOGGER.info(
         "conversion_end success=true input=%s output=%s exception_type=none",
         input_name,
@@ -762,6 +809,7 @@ def _run_directory(
     exclude_patterns: Sequence[str],
     report_json: Path | None,
     report_csv: Path | None,
+    quality_warnings: bool,
     converter_factory: Callable[[bool], Converter],
 ) -> int:
     try:
@@ -870,6 +918,7 @@ def _run_directory(
             converter,
             input_name=request.input_path.relative_to(input_dir).as_posix(),
             output_name=request.output_path.relative_to(output_dir).as_posix(),
+            quality_warnings=quality_warnings,
         )
         if failure is None:
             success_count += 1

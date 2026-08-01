@@ -38,6 +38,16 @@ class RecordingConverter:
         return f"# {input_path.stem}\n"
 
 
+class ContentConverter:
+    def __init__(self, outputs: dict[str, str]) -> None:
+        self.outputs = outputs
+        self.inputs: list[Path] = []
+
+    def convert(self, input_path: Path) -> str:
+        self.inputs.append(input_path)
+        return self.outputs[input_path.name]
+
+
 def fake_converter_factory(do_table_structure: bool = False) -> FakeConverter:
     return FakeConverter()
 
@@ -77,6 +87,7 @@ def test_convert_help_describes_directory_options(capsys: object) -> None:
     assert "--exclude" in help_text
     assert "--report-json" in help_text
     assert "--report-csv" in help_text
+    assert "--quality-warnings" in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:
@@ -1869,3 +1880,301 @@ def test_csv_success_is_kept_when_json_write_fails(
     assert json_path.read_text(encoding="utf-8") == "existing json"
     assert _read_csv_report(csv_path)[0]["status"] == "succeeded"
     assert capsys.readouterr().err.strip() == "JSONレポートを書き込めませんでした。"  # type: ignore[attr-defined]
+
+
+def test_quality_warnings_are_opt_in(tmp_path: Path, capsys: object) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    converter = ContentConverter({"one.pdf": "Traceback (most recent call last):\n"})
+
+    exit_code = run(
+        ["convert", str(input_path), "--output", str(tmp_path / "one.md")],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert "警告:" not in capsys.readouterr().err  # type: ignore[attr-defined]
+    assert converter.inputs == [input_path]
+
+
+def test_single_quality_warnings_accept_normal_markdown_and_convert_once(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    converter = ContentConverter(
+        {"one.pdf": "# Synthetic note\n\nThis fictional output has enough visible content.\n"}
+    )
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(tmp_path / "one.md"),
+            "--quality-warnings",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert "警告:" not in capsys.readouterr().err  # type: ignore[attr-defined]
+    assert converter.inputs == [input_path]
+
+
+def test_force_regenerated_empty_markdown_warns_without_failing(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    output_path = tmp_path / "one.md"
+    output_path.write_text("existing", encoding="utf-8")
+    converter = ContentConverter({"one.pdf": ""})
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--force",
+            "--quality-warnings",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert output_path.read_text(encoding="utf-8") == ""
+    assert "分類=empty-output" in stderr
+    assert "分類=short-output" not in stderr
+
+
+def test_single_quality_warnings_are_ordered_safe_and_non_fatal(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    markdown = (
+        "Synthetic content long enough for the runtime threshold.\n"
+        "C:\\Users\\private\\source.pdf\n"
+        "Traceback (most recent call last): private detail\n"
+        "\u202e"
+    )
+    converter = ContentConverter({"one.pdf": markdown})
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(tmp_path / "one.md"),
+            "--quality-warnings",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert [line.split(" 分類=")[1].split(" ")[0] for line in stderr.splitlines()] == [
+        "absolute-path",
+        "traceback",
+        "control-character",
+    ]
+    assert stderr.count("分類=absolute-path") == 1
+    assert "ファイル=one.pdf" in stderr
+    assert str(tmp_path) not in stderr
+    assert "private detail" not in stderr
+    assert "most recent call last" not in stderr
+
+
+def test_recursive_batch_quality_warning_continues_with_relative_posix_path(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("section/short.pdf", "section/normal.pdf", "ignored.pdf"))
+    converter = ContentConverter(
+        {
+            "short.pdf": "tiny",
+            "normal.pdf": "Synthetic Markdown output with enough visible content to pass.",
+        }
+    )
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--recursive",
+            "--include",
+            "section/*.pdf",
+            "--quality-warnings",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert "成功=2 失敗=0 スキップ=0" in captured.out
+    assert "ファイル=section/short.pdf 分類=short-output" in captured.err
+    assert "normal.pdf" not in captured.err
+    assert "ignored.pdf" not in captured.err
+    assert [path.name for path in converter.inputs] == ["normal.pdf", "short.pdf"]
+
+
+def test_skipped_markdown_is_not_quality_checked(tmp_path: Path, capsys: object) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("new.pdf", "skipped.pdf"))
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "skipped.md").write_text(
+        "Traceback (most recent call last):\n\u202e",
+        encoding="utf-8",
+    )
+    converter = ContentConverter(
+        {"new.pdf": "Synthetic Markdown output with enough visible content to pass."}
+    )
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--quality-warnings",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    assert exit_code == 0
+    assert "警告:" not in capsys.readouterr().err  # type: ignore[attr-defined]
+    assert [path.name for path in converter.inputs] == ["new.pdf"]
+
+
+def test_conversion_failure_remains_exit_one_without_quality_warning(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("broken.pdf",))
+    converter = RecordingConverter(failing_names={"broken.pdf"})
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--quality-warnings",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 1
+    assert "失敗: ファイル=broken.pdf" in stderr
+    assert "警告:" not in stderr
+
+
+def test_quality_warnings_do_not_change_json_or_csv_results(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    input_dir = tmp_path / "input"
+    _create_pdf_tree(input_dir, ("short.pdf",))
+    output_dir = tmp_path / "output"
+    json_path = tmp_path / "report.json"
+    csv_path = tmp_path / "report.csv"
+    converter = ContentConverter({"short.pdf": "tiny"})
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--quality-warnings",
+            "--report-json",
+            str(json_path),
+            "--report-csv",
+            str(csv_path),
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    json_report = _read_json_report(json_path)
+    csv_rows = _read_csv_report(csv_path)
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert json_report == {
+        "schema_version": 1,
+        "summary": {"total": 1, "succeeded": 1, "failed": 0, "skipped": 0},
+        "exit_code": 0,
+        "items": [
+            {
+                "input": "short.pdf",
+                "output": "short.md",
+                "status": "succeeded",
+                "error_category": None,
+                "message": None,
+            }
+        ],
+    }
+    assert csv_rows == [
+        {
+            "input": "short.pdf",
+            "output": "short.md",
+            "status": "succeeded",
+            "error_category": "",
+            "message": "",
+        }
+    ]
+    assert "warning" not in json_path.read_text(encoding="utf-8").casefold()
+    assert "warning" not in csv_path.read_text(encoding="utf-8-sig").casefold()
+    assert "成功=1 失敗=0 スキップ=0" in captured.out
+    assert "分類=short-output" in captured.err
+
+
+def test_quality_read_failure_is_safe_warning_without_status_change(
+    tmp_path: Path,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "one.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n")
+    output_path = tmp_path / "one.md"
+    converter = ContentConverter(
+        {"one.pdf": "Synthetic Markdown output with enough visible content to pass."}
+    )
+    original_read_text = Path.read_text
+
+    def failing_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == output_path:
+            raise PermissionError("synthetic private path detail")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--quality-warnings",
+        ],
+        converter_factory=lambda do_table_structure: converter,
+    )
+
+    stderr = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert exit_code == 0
+    assert stderr.strip() == (
+        "警告: ファイル=one.pdf 分類=quality-read-error 理由=Markdown出力を読み取れない"
+    )
+    assert str(tmp_path) not in stderr
+    assert "synthetic private path detail" not in stderr
