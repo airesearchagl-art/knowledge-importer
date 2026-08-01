@@ -11,29 +11,62 @@ OCR処理済みでテキストレイヤーを持つPDFを、ローカル環境�
 
 GUI、Obsidian連携、RAG登録、要約・タグ生成は未対応です。
 
-## セットアップ
+## Install
 
 Python 3.12と[uv](https://docs.astral.sh/uv/)を使用します。
+
+開発環境をrepositoryから構築する場合:
 
 ```powershell
 uv python install 3.12
 uv sync --dev
 ```
 
+ローカルwheelをbuildしてCLIとしてinstallする場合:
+
+```powershell
+uv build
+uv tool install .\dist\knowledge_importer-0.1.0-py3-none-any.whl
+knowledge-importer --help
+```
+
+`dist/`のwheelとsdistはGit管理対象外です。現在のversionは`0.1.0`で、PyPIなどへの公開は行っていません。
+
 初回セットアップまたは初回変換時、Doclingがローカル推論用パッケージやモデル成果物を取得する場合があります。変換処理自体はローカルで実行され、PDFは外部サービスへ送信されません。完全オフライン運用では、必要なモデル成果物を事前に取得したうえで、環境ごとの動作検証が別途必要です。
 
-## CLI
+## Quick Start
+
+### Single PDF
 
 ```powershell
 uv run knowledge-importer --help
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --force
 uv run knowledge-importer convert .\input\table.pdf --output .\output\table.md --table-structure
+```
+
+単一PDF変換では、既存出力は`--force`なしでは上書きせずエラーにします。`--table-structure`を指定した場合のみDocling TableFormerによる表構造推論を有効化します。表の行・列をMarkdown表として保持しやすくなる一方、初回は追加モデルの取得が発生する可能性があり、通常モードより処理時間とディスク使用量が増えます。
+
+### Batch conversion
+
+```powershell
 uv run knowledge-importer convert .\input --output .\output
 uv run knowledge-importer convert .\input --output .\output --force --table-structure
+```
+
+一括変換では、既存のMarkdownファイルを`--force`なしで安全にスキップし、`--force`指定時だけ再生成して上書きします。ログは`logs/knowledge-importer.log`に保存します。
+
+### Recursive conversion / include・exclude filters
+
+```powershell
 uv run knowledge-importer convert .\input --output .\output --recursive
 uv run knowledge-importer convert .\input --output .\output --include "*.pdf"
 uv run knowledge-importer convert .\input --output .\output --recursive --include "docs/**/*.pdf" --exclude "archive/**"
+```
+
+### Reports and quality checks
+
+```powershell
 uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json
 uv run knowledge-importer convert .\input --output .\output --report-csv .\reports\batch-result.csv
 uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json --report-csv .\reports\batch-result.csv
@@ -41,9 +74,6 @@ uv run knowledge-importer convert .\input --output .\output --quality-warnings
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --quality-report-json .\reports\sample-quality.json
 uv run knowledge-importer convert .\input --output .\output --quality-report-json .\reports\quality.json --quality-warnings
 ```
-
-単一PDF変換では、既存出力は `--force` なしでは上書きせずエラーにします。一括変換では、既存のMarkdownファイルを `--force` なしで安全にスキップし、`--force` 指定時だけ再生成して上書きします。ログは `logs/knowledge-importer.log` に保存します。
-`--table-structure` を指定した場合のみDocling TableFormerによる表構造推論を有効化します。表の行・列をMarkdown表として保持しやすくなる一方、初回は追加モデルの取得が発生する可能性があり、通常モードより処理時間とディスク使用量が増えます。
 
 入力にディレクトリを指定すると、デフォルトでは直下の `.pdf`（大文字・小文字を区別しない）だけを相対パスの安定順で逐次変換します。`--recursive` 指定時だけサブディレクトリを探索し、入力からの相対構造を出力先でも維持します。`--table-structure` は全PDFへ適用され、`--force` は各出力の上書きを許可します。
 
@@ -74,6 +104,8 @@ uv run knowledge-importer convert .\input --output .\output `
 失敗: ファイル=broken.pdf 分類=converter生成・変換処理関連 理由=RuntimeError: synthetic parse failure
 一括変換完了: 成功=2 失敗=1 スキップ=1 分類別: 入力・パス関連=0 出力競合・書き込み関連=0 converter生成・変換処理関連=1 想定外エラー=0
 ```
+
+### Exit codes
 
 終了コードは、変換対象がすべて成功またはスキップなら `0`、1件以上の変換失敗・converter生成失敗・想定外エラーがあれば `1`、入力ディレクトリが空、出力先形式が不正、同一出力名が衝突するなど一括変換開始前の検証エラーは `2` です。
 
@@ -132,13 +164,7 @@ section/b.PDF,section/b.md,skipped,,既存の出力を保持しました。
 
 OCR済みPDFを前提とし、Doclingの `do_ocr=False`、`force_backend_text=True` を明示しています。通常モードは `do_table_structure=False`、`--table-structure` 指定時のみ `do_table_structure=True` です。画像だけのスキャンPDFに対する再OCRは行いません。また、`enable_remote_services=False` により外部推論サービスを無効化しています。
 
-## 開発時の確認
-
-```powershell
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-```
+## 品質評価
 
 架空PDFによる変換品質評価の生成方法、指標、既知制約は [PDF変換品質評価](docs/pdf-quality-evaluation.md) を参照してください。
 
@@ -209,10 +235,23 @@ skipped、変換失敗、include/exclude対象外はitemsへ含めません。�
 
 GitHub Actionsでは `Markdown quality regression` ステップが品質評価8件を明示的に実行し、通常の `Pytest` ステップが残りのテストを実行します。品質評価にDocling実推論、モデル取得、外部通信は不要です。ローカルでは従来どおり `uv run pytest` だけで両方を実行できます。
 
-## 制約とデータ管理
+## Development / Test
+
+```powershell
+uv sync --locked --dev
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv build
+```
+
+`tests/test_release_readiness.py`は合成fixtureとfake converterだけを使い、wheel/sdist、clean venvへのwheel本体install、CLI help、JSON・CSV・品質JSONの統合出力を検証します。実Docling推論やモデルdownloadは実行せず、実PDFの変換品質や完全オフライン変換を保証するテストではありません。
+
+## Offline / Known limitations
 
 - PDFの複雑な段組み、表、数式ではMarkdownの再現性に差が出ます。初期版では表構造推論を無効化しています。
 - `do_ocr=False` のため、OCRされていない画像PDFやテキスト層が欠落・破損したPDFからは本文を抽出できません。
+- Docling本体や必要なモデル成果物がcacheされていない完全オフライン環境では、依存関係のinstallや実変換を開始できない場合があります。
 - 実資料、実案件名、実会社名、実個人名をリポジトリへ追加しないでください。
 - `input/`、`output/`、`logs/` の実ファイルはGit管理対象外です。
 
