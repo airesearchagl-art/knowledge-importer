@@ -19,6 +19,8 @@
 - wheel本体のoffline install、CLI help、package import: 成功
 - unit / integration / release-readiness tests: 成功
 - fake converterによるBatch JSON、CSV、Quality JSON統合smoke: 成功
+- fixed revisionのlocal artifactsを使うproduction Docling smoke: 成功
+- 通常モード4件、TableFormerモード2件、offline再実行: 成功
 - tracked filesと配布物のsecret、実メール、local identity、実PDF、巨大ファイル検査: 検出0件
 - wheel / sdistへのtests、scripts、生成出力、cache、`.env`混入: 検出0件
 - 外部API、外部MCP、モデルdownload: 未使用
@@ -27,28 +29,28 @@
 
 - [x] project licenseをMITとし、`LICENSE`とpackage metadataへ反映する
 - [ ] `THIRD_PARTY_LICENSES_REVIEW.md`のunknown・再配布注意候補を人が確認する
-- [ ] Heronのfull revisionをDoclingの`revision="main"`へofflineで安全に対応付け、実変換を再検証する
+- [x] Heronのfull revisionを正式なlocal artifacts経路で指定し、offline実変換を再検証する
 - [ ] Docling codeとruntime dependencyのlicense原文について最終的な人手確認を行う
 - [ ] ソース公開状態の継続前提として、各PRの最終diffを人が確認する
 
 wheel / sdistの公開配布、GitHub Release、PyPI、tag作成、model再配布を将来行う場合は、別作業としてdependency、native library、NOTICE、model termsを再確認します。
 
-## 実Docling smoke結果（2026-08-08）
+## 実Docling smoke結果（2026-08-09）
 
 GitHubソース公開状態の継続検証で、次の架空PDFを一時生成しました。すべてテキスト層を持ち、全9ページの画像レンダリングで欠け・重なり・文字化けがないことを確認しました。
 
 | 架空PDF | 構成 | production Docling / Quality Report |
 |---|---|---|
-| Basic document | 見出し、段落、箇条書き、2ページ | offline初期化失敗 |
-| Table document | 3列4行の表、前後文、2ページ | `--table-structure`でもoffline初期化失敗 |
-| Japanese mixed document | 日本語、ASCII、箇条書き、表、2ページ | batchでoffline初期化失敗 |
-| Multi-section document | 3階層見出し、表、箇条書き、3ページ | batchでoffline初期化失敗 |
+| Basic document | 見出し、段落、箇条書き、2ページ | 成功、Quality passed |
+| Table document | 3列4データ行の表、前後文、2ページ | 通常成功、TableFormerで表構造改善 |
+| Japanese mixed document | 日本語、ASCII、箇条書き、表、2ページ | 通常・TableFormer成功、Quality passed |
+| Multi-section document | 3階層見出し、表、箇条書き、3ページ | 成功、Quality passed |
 
-Heron snapshot `1907ed0d4f5ef93ada62374230490e95c599fceb`とTableFormer snapshot `fc0f2d45e2218ea24bce5045f58a389aed16dc23`（`v2.3.0`）はlocal cacheに存在し、必要artifactも確認できました。ただしHeron cacheに`main` refがなく、Docling 2.113.0が指定する`revision="main"`を完全offlineで解決できないため、通常モードと表構造モードは`LocalEntryNotFoundError`で初期化に失敗しました。
+Heron snapshot `1907ed0d4f5ef93ada62374230490e95c599fceb`とTableFormer snapshot `fc0f2d45e2218ea24bce5045f58a389aed16dc23`（`v2.3.0`）を、repository外の一時local artifacts rootへ配置し、`--artifacts-path`で`PdfPipelineOptions.artifacts_path`へ渡しました。cacheの`main` refやmetadataは変更していません。
 
-batch reportは4件すべてを`converter生成・変換処理関連`の失敗として、安全な相対pathだけでJSON / CSVへ記録しました。Quality JSONは検査対象がないため`checked=0`でした。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
+batch reportは`total=4`, `succeeded=4`, `failed=0`, `skipped=0`で、JSON / CSVは同じitemsを安全な相対pathだけで記録しました。Quality JSONは`checked=4`, `passed=4`, `warned=0`でした。再実行は4件skip、`--force`は4件再生成に成功し、初回とSHA-256が一致しました。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
 
-このためreal Docling smoke、TableFormer比較、成功Markdownの品質評価は未完了のHuman Gateとして維持します。GitHubソースはmodelを同梱・再配布しない条件で公開継続可能ですが、この結果はwheel / PyPI / model再配布を許可するものではありません。
+real Docling smoke、TableFormer比較、成功Markdownの基礎品質評価は完了しました。GitHubソースはmodelを同梱・再配布しない条件で公開継続可能ですが、この結果はwheel / PyPI / model再配布を許可するものではありません。modelとruntime dependencyのlicense原文確認は引き続きHuman Gateです。
 
 ## Offline確認結果
 
@@ -59,7 +61,7 @@ batch reportは4件すべてを`converter生成・変換処理関連`の失敗�
 | CLI help / package import | 成功 |
 | 依存込み完全offline install | Docling wheelがuv cacheになく失敗 |
 | fake converter smoke | 成功 |
-| real Docling smoke | snapshot artifactは存在するがHeron `main` refをoffline解決できず失敗 |
+| real Docling smoke | fixed revisionのlocal artifacts指定で通常4件・TableFormer 2件に成功 |
 
 ## v0.1.0 Release Notes草案
 
@@ -81,5 +83,5 @@ batch reportは4件すべてを`converter生成・変換処理関連`の失敗�
 - OCR、外部API、cloud OCR、LLM評価は実行しない
 - 未OCR画像PDF、複雑な段組み、数式、複雑な表の再現を保証しない
 - 完全offline installと実変換には依存wheelとDocling model artifactの事前cacheが必要
-- real Docling offline smokeはHeron `main` refを解決できず未完了
+- real Docling offline smokeはfixed revisionのlocal artifacts指定で完了
 - GitHubソース公開以外の公開先・配布形式は対象外

@@ -82,6 +82,7 @@ def test_convert_help_describes_directory_options(capsys: object) -> None:
     assert exc_info.value.code == 0
     help_text = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "--table-structure" in help_text
+    assert "--artifacts-path PATH" in help_text
     assert "--recursive" in help_text
     assert "--include" in help_text
     assert "--exclude" in help_text
@@ -136,6 +137,121 @@ def test_convert_passes_table_structure_setting_to_factory(
 
     assert exit_code == 0
     assert received == [expected_table_structure]
+
+
+@pytest.mark.parametrize("is_batch", [False, True])
+def test_convert_passes_local_artifacts_path_to_factory(
+    tmp_path: Path,
+    is_batch: bool,
+) -> None:
+    artifacts_path = tmp_path / "local-artifacts"
+    artifacts_path.mkdir()
+    input_path = tmp_path / ("input" if is_batch else "fixture.pdf")
+    output_path = tmp_path / ("output" if is_batch else "result.md")
+    if is_batch:
+        input_path.mkdir()
+        (input_path / "fixture.pdf").write_bytes(b"%PDF-1.4\n")
+    else:
+        input_path.write_bytes(b"%PDF-1.4\n")
+    received: list[tuple[bool, Path]] = []
+
+    def recording_factory(
+        do_table_structure: bool,
+        local_artifacts_path: Path,
+    ) -> FakeConverter:
+        received.append((do_table_structure, local_artifacts_path))
+        return FakeConverter()
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--table-structure",
+            "--artifacts-path",
+            str(artifacts_path),
+        ],
+        converter_factory=recording_factory,
+    )
+
+    assert exit_code == 0
+    assert received == [(True, artifacts_path)]
+
+
+@pytest.mark.parametrize("kind", ["missing", "file"])
+def test_convert_rejects_invalid_local_artifacts_path_without_exposing_it(
+    tmp_path: Path,
+    capsys: object,
+    kind: str,
+) -> None:
+    source = tmp_path / "fixture.pdf"
+    source.write_bytes(b"%PDF-1.4\n")
+    artifacts_path = tmp_path / "private-model-location"
+    if kind == "file":
+        artifacts_path.write_text("not a directory", encoding="utf-8")
+
+    exit_code = run(
+        [
+            "convert",
+            str(source),
+            "--output",
+            str(tmp_path / "result.md"),
+            "--artifacts-path",
+            str(artifacts_path),
+        ],
+        converter_factory=fake_converter_factory,
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert exit_code == 2
+    assert "存在するローカルディレクトリ" in captured.err
+    assert str(artifacts_path) not in captured.err
+    assert captured.out == ""
+
+
+def test_local_artifacts_path_is_not_added_to_batch_report(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "fixture.pdf").write_bytes(b"%PDF-1.4\n")
+    output_dir = tmp_path / "output"
+    artifacts_path = tmp_path / "private-model-location"
+    artifacts_path.mkdir()
+    report_path = tmp_path / "report.json"
+
+    exit_code = run(
+        [
+            "convert",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--artifacts-path",
+            str(artifacts_path),
+            "--report-json",
+            str(report_path),
+        ],
+        converter_factory=lambda do_table_structure, local_artifacts_path: FakeConverter(),
+    )
+
+    report_text = report_path.read_text(encoding="utf-8")
+    assert exit_code == 0
+    assert str(artifacts_path) not in report_text
+    assert _read_json_report(report_path) == {
+        "schema_version": 1,
+        "summary": {"total": 1, "succeeded": 1, "failed": 0, "skipped": 0},
+        "exit_code": 0,
+        "items": [
+            {
+                "input": "fixture.pdf",
+                "output": "fixture.md",
+                "status": "succeeded",
+                "error_category": None,
+                "message": None,
+            }
+        ],
+    }
 
 
 def test_missing_input_returns_nonzero(tmp_path: Path, capsys: object) -> None:
