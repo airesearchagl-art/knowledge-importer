@@ -28,9 +28,10 @@
 ## 未完了のHuman Gate
 
 - [x] project licenseをMITとし、`LICENSE`とpackage metadataへ反映する
-- [ ] `THIRD_PARTY_LICENSES_REVIEW.md`のunknown・再配布注意候補を人が確認する
+- [x] 実変換経路の主要runtime dependencyについて、installed metadataと同梱license / notice fileの有無を記録する
 - [x] Heronのfull revisionを正式なlocal artifacts経路で指定し、offline実変換を再検証する
-- [ ] Docling codeとruntime dependencyのlicense原文について最終的な人手確認を行う
+- [ ] fixed model revisionに適用される原文license、NOTICE、attribution、再配布条件を人が確認する
+- [ ] binary配布を行う場合、対象platformのruntime wheelに含まれるnative libraryとthird-party noticeを人が確認する
 - [ ] ソース公開状態の継続前提として、各PRの最終diffを人が確認する
 
 wheel / sdistの公開配布、GitHub Release、PyPI、tag作成、model再配布を将来行う場合は、別作業としてdependency、native library、NOTICE、model termsを再確認します。
@@ -50,7 +51,7 @@ Heron snapshot `1907ed0d4f5ef93ada62374230490e95c599fceb`とTableFormer snapshot
 
 batch reportは`total=4`, `succeeded=4`, `failed=0`, `skipped=0`で、JSON / CSVは同じitemsを安全な相対pathだけで記録しました。Quality JSONは`checked=4`, `passed=4`, `warned=0`でした。再実行は4件skip、`--force`は4件再生成に成功し、初回とSHA-256が一致しました。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
 
-real Docling smoke、TableFormer比較、成功Markdownの基礎品質評価は完了しました。GitHubソースはmodelを同梱・再配布しない条件で公開継続可能ですが、この結果はwheel / PyPI / model再配布を許可するものではありません。modelとruntime dependencyのlicense原文確認は引き続きHuman Gateです。
+real Docling smoke、TableFormer比較、成功Markdownの基礎品質評価は完了しました。GitHubソースは第三者code、runtime wheel、model artifactを同梱・再配布しない条件で公開継続可能です。この結果はGitHub Release、wheel / sdist、PyPI、依存packageを含むbinary、model再配布を許可するものではありません。fixed model revisionの原文条件と、binary配布時のruntime dependency・native library・NOTICE確認は引き続きHuman Gateです。
 
 ## Offline確認結果
 

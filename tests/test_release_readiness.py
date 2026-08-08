@@ -197,6 +197,10 @@ def test_public_release_gate_documents_keep_human_decisions_explicit() -> None:
     assert "fc0f2d45e2218ea24bce5045f58a389aed16dc23" in checklist
     assert "docling-project/docling-layout-heron" in license_review
     assert "docling-project/docling-models" in license_review
+    assert "固定revisionのmetadataは`CDLA-Permissive-2.0`のみ" in license_review
+    assert "third-party codeやruntime wheelを同梱していません" in license_review
+    assert "pypdfium2" in license_review
+    assert "opencv-python" in license_review
     assert "model download、cache ref追加、repositoryへのcopyは行っていません" in license_review
     assert "--artifacts-path" in readme
     assert "通常モード4件、TableFormerモード2件、offline再実行に成功" in readme
@@ -208,6 +212,7 @@ def test_public_release_gate_documents_keep_human_decisions_explicit() -> None:
     assert "succeeded=4" in smoke_validation
     assert "checked=4" in smoke_validation
     assert "modelをrepositoryへ含めず" in smoke_validation
+    assert "判定: **条件付きGitHubソース公開継続可**" in smoke_validation
 
 
 def test_project_mit_license_and_package_metadata_are_consistent() -> None:
