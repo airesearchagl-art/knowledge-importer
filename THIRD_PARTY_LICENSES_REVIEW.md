@@ -6,8 +6,8 @@
 
 | 対象 | Version / 範囲 | Metadata上のlicense | License file | Metadata URL | 用途・確認事項 |
 |---|---:|---|---:|---|---|
-| knowledge-importer | 0.1.0 | unknown | なし | repository | LICENSEとpackage license metadataが未決定。公開blocker |
-| docling | 2.113.0 | MIT | metadataから未検出 | https://github.com/docling-project/docling | 唯一のruntime direct dependency。原文と再配布条件の確認が必要 |
+| knowledge-importer | 0.1.0 | MIT | `LICENSE` | repository | `Copyright (c) 2026 airesearchagl-art`とpackage metadataに反映済み |
+| docling | 2.113.0 | MIT | metadataから未検出 | https://github.com/docling-project/docling | 唯一のruntime direct dependency。Docling codeのmetadata上の記録であり、model artifactには適用しない |
 | argparse | Python 3.12標準library | package metadata対象外 | package外 | metadata対象外 | CLI framework。Python自体を同梱配布する場合は別途確認 |
 | reportlab | 5.0.0 | BSD licenseとの記載 | 4件検出 | https://www.reportlab.com/ | dev dependency、合成PDF生成用。license.txt原文確認が必要 |
 | pypdf | 6.14.2 | BSD-3-Clause | 1件検出 | https://github.com/py-pdf/pypdf | dev dependency、PDFテキスト層検査用 |
@@ -15,16 +15,21 @@
 | ruff | 0.12.12 | unknown | 1件検出 | https://github.com/astral-sh/ruff | dev tooling。metadata fieldが空のため原文確認が必要 |
 | uv_build | >=0.11.0,<0.12.0 | unknown | local metadata未取得 | local metadata未取得 | build backend。公開前に使用versionと原文確認が必要 |
 
-wheelのmemberは`knowledge_importer` packageとdist-infoだけで、第三者packageのsource code同梱は検出されませんでした。sdistもREADME、pyproject、`src/knowledge_importer`だけです。ただし、利用者がinstallするDoclingのtransitive dependencyは別途確認対象です。
+wheelのmemberは`knowledge_importer` package、dist-info、project `LICENSE`だけで、第三者packageのsource code同梱は検出されません。sdistにもproject `LICENSE`を含めます。利用者がinstallするDoclingのtransitive dependencyは別途確認対象です。
+
+## Docling codeとmodel artifactの分離
+
+Docling 2.113.0のcodeはlocal package metadata上MITです。一方、Doclingが利用するmodel artifactはDocling codeとは別の配布物であり、Knowledge ImporterのMIT LicenseやDocling codeのlicenseからmodelごとの条件を推測しません。
+
+Knowledge Importerのrepository、wheel、sdistにmodel artifactは含めず、本projectから再配布しません。利用者によるmodel取得・利用前に、対象modelのlicense、terms、取得条件のmanual verificationが必要です。
 
 ## Metadataがunknownだったinstalled distribution
 
-local環境の110 distributions中、次の11件はlicense metadata fieldが空または判別不能でした。license fileが存在する場合でも、metadataだけでは断定していません。
+local環境の110 distributions中、次の10件はlicense metadata fieldが空または判別不能でした。license fileが存在する場合でも、metadataだけでは断定していません。
 
 - annotated-types 0.7.0
 - colorama 0.4.6
 - Jinja2 3.1.6
-- knowledge-importer 0.1.0
 - markdown-it-py 4.2.0
 - mdurl 0.1.2
 - omegaconf 2.3.1
@@ -45,9 +50,9 @@ local環境の110 distributions中、次の11件はlicense metadata fieldが空�
 
 ## 公開前に人が確認する事項
 
-- project licenseとcopyright holder
+- project MIT Licenseとcopyright表記の最終確認
 - Docling本体およびruntime transitive dependencyのlicense原文
 - binary wheelに含まれるnative libraryとnotice要件
 - model artifactのlicense、取得条件、再配布可否
-- GitHub Releaseのみか、wheel / sdist / installerを配布するか
+- 将来wheel / sdist / installerを公開する場合の配布形式（今回はGitHubソース公開のみ）
 - 必要なNOTICEまたはthird-party attributionの形式

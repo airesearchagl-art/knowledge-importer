@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from importlib.metadata import version
 from pathlib import Path
@@ -96,17 +97,39 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     with zipfile.ZipFile(wheel_path) as wheel:
         wheel_names = set(wheel.namelist())
     assert wheel_names >= EXPECTED_PACKAGE_MODULES
+    assert any(name.endswith(".dist-info/licenses/LICENSE") for name in wheel_names)
     assert not any(
         unwanted in name.casefold()
         for name in wheel_names
-        for unwanted in ("tests/", "scripts/", "output/", ".pytest", ".env")
+        for unwanted in (
+            "tests/",
+            "scripts/",
+            "output/",
+            ".pytest",
+            ".env",
+            "models--",
+            ".safetensors",
+            "pytorch_model",
+            "huggingface",
+        )
     )
     with tarfile.open(sdist_path) as sdist:
         sdist_names = {name.casefold() for name in sdist.getnames()}
+    assert "knowledge_importer-0.1.0/license" in sdist_names
     assert not any(
         unwanted in name
         for name in sdist_names
-        for unwanted in ("/tests/", "/scripts/", "/output/", "/.pytest", "/.env")
+        for unwanted in (
+            "/tests/",
+            "/scripts/",
+            "/output/",
+            "/.pytest",
+            "/.env",
+            "/models--",
+            ".safetensors",
+            "pytorch_model",
+            "/huggingface",
+        )
     )
 
     venv_path = tmp_path / "clean-venv"
@@ -162,12 +185,27 @@ def test_public_release_gate_documents_keep_human_decisions_explicit() -> None:
 
     assert "[v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md)" in readme
     assert "[Third-party License Metadata Review](THIRD_PARTY_LICENSES_REVIEW.md)" in readme
-    assert "判定: **公開準備不可**" in checklist
-    assert "project license" in checklist
+    assert "判定: **条件付きGitHubソース公開可**" in checklist
+    assert "GitHub Release、wheel / sdist配布、PyPI公開" in checklist
     assert "real Docling" in checklist
     assert "法的判断を行いません" in license_review
     assert "docling" in license_review
+    assert "model artifact" in license_review
     assert "unknown" in license_review
+
+
+def test_project_mit_license_and_package_metadata_are_consistent() -> None:
+    license_text = (REPOSITORY_ROOT / "LICENSE").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert license_text.startswith("MIT License\n\nCopyright (c) 2026 airesearchagl-art")
+    assert "Permission is hereby granted, free of charge" in license_text
+    assert pyproject["project"]["version"] == "0.1.0"
+    assert pyproject["project"]["license"] == "MIT"
+    assert pyproject["project"]["license-files"] == ["LICENSE"]
+    assert "[MIT License](LICENSE)" in readme
+    assert "model artifactはこのrepositoryに含まれず" in readme
 
 
 def test_integrated_batch_reports_and_quality_warning_smoke(

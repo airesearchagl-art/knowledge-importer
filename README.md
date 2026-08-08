@@ -30,7 +30,7 @@ uv tool install .\dist\knowledge_importer-0.1.0-py3-none-any.whl
 knowledge-importer --help
 ```
 
-`dist/`のwheelとsdistはGit管理対象外です。現在のversionは`0.1.0`で、PyPIなどへの公開は行っていません。
+`dist/`のwheelとsdistはGit管理対象外です。現在のversionは`0.1.0`で、GitHubでのソースコード公開のみを対象とし、GitHub Release、wheel配布、PyPI公開は行いません。
 
 初回セットアップまたは初回変換時、Doclingがローカル推論用パッケージやモデル成果物を取得する場合があります。変換処理自体はローカルで実行され、PDFは外部サービスへ送信されません。完全オフライン運用では、必要なモデル成果物を事前に取得したうえで、環境ごとの動作検証が別途必要です。
 
@@ -257,4 +257,6 @@ uv build
 
 ## ライセンス
 
-プロジェクトのライセンスは未決定です。方針が決まるまで `LICENSE` とpackage license metadataは追加せず、tag、GitHub Release、PyPIなどへの公開を行いません。公開前の確認事項は [v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md) と [Third-party License Metadata Review](THIRD_PARTY_LICENSES_REVIEW.md) を参照してください。
+Knowledge Importer本体は [MIT License](LICENSE) です。third-party dependenciesはそれぞれのlicenseに従い、Knowledge ImporterのMIT Licenseはそれらの条件を包含・置換しません。
+
+Doclingのmodel artifactはこのrepositoryに含まれず、同梱・再配布もしません。modelを取得・利用する方は、対象modelごとのlicenseと利用条件を確認してください。公開前の技術的・人手確認は [v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md) と [Third-party License Metadata Review](THIRD_PARTY_LICENSES_REVIEW.md) を参照してください。
