@@ -185,13 +185,26 @@ def test_public_release_gate_documents_keep_human_decisions_explicit() -> None:
 
     assert "[v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md)" in readme
     assert "[Third-party License Metadata Review](THIRD_PARTY_LICENSES_REVIEW.md)" in readme
-    assert "判定: **GitHubソース公開継続可（Human Gate継続）**" in checklist
+    assert "判定: **条件付きGitHubソース公開継続可**" in checklist
     assert "GitHub Release、wheel / sdist配布、PyPI公開" in checklist
     assert "real Docling" in checklist
     assert "法的判断を行いません" in license_review
     assert "docling" in license_review
     assert "model artifact" in license_review
     assert "unknown" in license_review
+    assert "1907ed0d4f5ef93ada62374230490e95c599fceb" in checklist
+    assert "fc0f2d45e2218ea24bce5045f58a389aed16dc23" in checklist
+    assert "docling-project/docling-layout-heron" in license_review
+    assert "docling-project/docling-models" in license_review
+    assert "model download、cache ref追加、repositoryへのcopyは行っていません" in license_review
+    assert "full revisionのsnapshotだけがcacheされ" in readme
+
+    smoke_validation = (REPOSITORY_ROOT / "docs" / "REAL_DOCLING_SMOKE_VALIDATION.md").read_text(
+        encoding="utf-8"
+    )
+    assert "判定: **failed**" in smoke_validation
+    assert "LocalEntryNotFoundError" in smoke_validation
+    assert "modelをrepositoryへ含めず" in smoke_validation
 
 
 def test_project_mit_license_and_package_metadata_are_consistent() -> None:

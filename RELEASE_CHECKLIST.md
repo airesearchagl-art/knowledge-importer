@@ -1,6 +1,6 @@
 # v0.1.0 Public Release Gate
 
-判定: **GitHubソース公開継続可（Human Gate継続）**
+判定: **条件付きGitHubソース公開継続可**
 
 この文書は、既にpublicであるGitHub repositoryのソース公開状態を安全に継続するため、人が確認する項目をまとめたものです。repositoryをこれからpublicへ切り替えることを前提としません。ライセンスや法的適合性を判断する文書ではありません。GitHub Release、wheel / sdist配布、PyPI公開、model artifact再配布は別のHuman Gateが必要で、今回の対象外です。
 
@@ -27,26 +27,28 @@
 
 - [x] project licenseをMITとし、`LICENSE`とpackage metadataへ反映する
 - [ ] `THIRD_PARTY_LICENSES_REVIEW.md`のunknown・再配布注意候補を人が確認する
-- [ ] 必要なDocling model artifactを適法な方法で事前取得し、offline実変換を再検証する
+- [ ] Heronのfull revisionをDoclingの`revision="main"`へofflineで安全に対応付け、実変換を再検証する
 - [ ] Docling codeとruntime dependencyのlicense原文について最終的な人手確認を行う
 - [ ] ソース公開状態の継続前提として、各PRの最終diffを人が確認する
 
 wheel / sdistの公開配布、GitHub Release、PyPI、tag作成、model再配布を将来行う場合は、別作業としてdependency、native library、NOTICE、model termsを再確認します。
 
-## 実Docling smoke結果
+## 実Docling smoke結果（2026-08-08）
 
 GitHubソース公開状態の継続検証で、次の架空PDFを一時生成しました。すべてテキスト層を持ち、全9ページの画像レンダリングで欠け・重なり・文字化けがないことを確認しました。
 
 | 架空PDF | 構成 | production Docling / Quality Report |
 |---|---|---|
-| Basic document | 見出し、段落、箇条書き、2ページ | model cache不足のため未実行 |
-| Table document | 3列4行の表、前後文、2ページ | model cache不足のため未実行 |
-| Japanese mixed document | 日本語、ASCII、箇条書き、表、2ページ | model cache不足のため未実行 |
-| Multi-section document | 3階層見出し、表、箇条書き、3ページ | model cache不足のため未実行 |
+| Basic document | 見出し、段落、箇条書き、2ページ | offline初期化失敗 |
+| Table document | 3列4行の表、前後文、2ページ | `--table-structure`でもoffline初期化失敗 |
+| Japanese mixed document | 日本語、ASCII、箇条書き、表、2ページ | batchでoffline初期化失敗 |
+| Multi-section document | 3階層見出し、表、箇条書き、3ページ | batchでoffline初期化失敗 |
 
-production Doclingが参照するmodel snapshot / artifactはlocal cacheから確認できませんでした。確認できたHugging Face cacheは本変換と無関係の音声認識modelのみです。指示どおりmodel downloadや取得requestを開始せず、production CLIによる変換とQuality Report生成は実行していません。
+Heron snapshot `1907ed0d4f5ef93ada62374230490e95c599fceb`とTableFormer snapshot `fc0f2d45e2218ea24bce5045f58a389aed16dc23`（`v2.3.0`）はlocal cacheに存在し、必要artifactも確認できました。ただしHeron cacheに`main` refがなく、Docling 2.113.0が指定する`revision="main"`を完全offlineで解決できないため、通常モードと表構造モードは`LocalEntryNotFoundError`で初期化に失敗しました。
 
-このためreal Docling smokeは未完了のHuman Gateとして維持します。この未完了項目は、wheel / PyPI / model再配布を許可する結果ではありません。
+batch reportは4件すべてを`converter生成・変換処理関連`の失敗として、安全な相対pathだけでJSON / CSVへ記録しました。Quality JSONは検査対象がないため`checked=0`でした。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
+
+このためreal Docling smoke、TableFormer比較、成功Markdownの品質評価は未完了のHuman Gateとして維持します。GitHubソースはmodelを同梱・再配布しない条件で公開継続可能ですが、この結果はwheel / PyPI / model再配布を許可するものではありません。
 
 ## Offline確認結果
 
@@ -57,7 +59,7 @@ production Doclingが参照するmodel snapshot / artifactはlocal cacheから�
 | CLI help / package import | 成功 |
 | 依存込み完全offline install | Docling wheelがuv cacheになく失敗 |
 | fake converter smoke | 成功 |
-| real Docling smoke | model snapshot不足のため未実行（過去のoffline検証でも同不足により失敗） |
+| real Docling smoke | snapshot artifactは存在するがHeron `main` refをoffline解決できず失敗 |
 
 ## v0.1.0 Release Notes草案
 
@@ -79,5 +81,5 @@ production Doclingが参照するmodel snapshot / artifactはlocal cacheから�
 - OCR、外部API、cloud OCR、LLM評価は実行しない
 - 未OCR画像PDF、複雑な段組み、数式、複雑な表の再現を保証しない
 - 完全offline installと実変換には依存wheelとDocling model artifactの事前cacheが必要
-- real Docling offline smokeは必要model snapshot不足のため未完了
+- real Docling offline smokeはHeron `main` refを解決できず未完了
 - GitHubソース公開以外の公開先・配布形式は対象外

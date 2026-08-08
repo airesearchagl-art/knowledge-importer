@@ -23,6 +23,17 @@ Docling 2.113.0のcodeはlocal package metadata上MITです。一方、Docling�
 
 Knowledge Importerのrepository、wheel、sdistにmodel artifactは含めず、本projectから再配布しません。利用者によるmodel取得・利用前に、対象modelのlicense、terms、取得条件のmanual verificationが必要です。
 
+### Manual smokeで確認したmodel revision
+
+| 用途 | Repository | 固定revision | Metadata上のlicense | Human Gate |
+|---|---|---|---|---|
+| Layout Heron | `docling-project/docling-layout-heron` | `1907ed0d4f5ef93ada62374230490e95c599fceb` | Apache-2.0 | model cardと原文license、Doclingの`main`指定との対応付けを人が確認する |
+| TableFormer V1 accurate | `docling-project/docling-models` | `fc0f2d45e2218ea24bce5045f58a389aed16dc23`（`v2.3.0`） | CDLA-Permissive-2.0 / Apache-2.0 | `model_artifacts/tableformer/accurate`へ適用される条件をmodel card・原文から人が確認する |
+
+上記licenseはmodel repository metadataの記録であり、個別artifactへの適用関係や再配布可否を判断するものではありません。特に`docling-models`は複数license表記があるため、TableFormer weightとconfigに適用される原文条件を確認する必要があります。
+
+2026-08-08のmanual smokeでは両snapshotがrepository外のlocal cacheに存在することを確認しましたが、Heronに`main` refがなく完全offline初期化は失敗しました。model download、cache ref追加、repositoryへのcopyは行っていません。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
+
 ## Metadataがunknownだったinstalled distribution
 
 local環境の110 distributions中、次の10件はlicense metadata fieldが空または判別不能でした。license fileが存在する場合でも、metadataだけでは断定していません。
