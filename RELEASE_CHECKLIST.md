@@ -1,8 +1,8 @@
 # v0.1.0 Public Release Gate
 
-判定: **条件付きGitHubソース公開可**
+判定: **GitHubソース公開継続可（Human Gate継続）**
 
-この文書はGitHubでのソースコード公開前に、人が確認する項目をまとめたものです。ライセンスや法的適合性を判断する文書ではありません。GitHub Release、wheel / sdist配布、PyPI公開、model artifact再配布は別のHuman Gateが必要で、今回の対象外です。
+この文書は、既にpublicであるGitHub repositoryのソース公開状態を安全に継続するため、人が確認する項目をまとめたものです。repositoryをこれからpublicへ切り替えることを前提としません。ライセンスや法的適合性を判断する文書ではありません。GitHub Release、wheel / sdist配布、PyPI公開、model artifact再配布は別のHuman Gateが必要で、今回の対象外です。
 
 ## 公開範囲
 
@@ -29,13 +29,13 @@
 - [ ] `THIRD_PARTY_LICENSES_REVIEW.md`のunknown・再配布注意候補を人が確認する
 - [ ] 必要なDocling model artifactを適法な方法で事前取得し、offline実変換を再検証する
 - [ ] Docling codeとruntime dependencyのlicense原文について最終的な人手確認を行う
-- [ ] GitHubソース公開前にrepository visibilityと最終diffを人が確認する
+- [ ] ソース公開状態の継続前提として、各PRの最終diffを人が確認する
 
 wheel / sdistの公開配布、GitHub Release、PyPI、tag作成、model再配布を将来行う場合は、別作業としてdependency、native library、NOTICE、model termsを再確認します。
 
 ## 実Docling smoke結果
 
-GitHubソース公開前検証で、次の架空PDFを一時生成しました。すべてテキスト層を持ち、全9ページの画像レンダリングで欠け・重なり・文字化けがないことを確認しました。
+GitHubソース公開状態の継続検証で、次の架空PDFを一時生成しました。すべてテキスト層を持ち、全9ページの画像レンダリングで欠け・重なり・文字化けがないことを確認しました。
 
 | 架空PDF | 構成 | production Docling / Quality Report |
 |---|---|---|
@@ -46,7 +46,7 @@ GitHubソース公開前検証で、次の架空PDFを一時生成しました�
 
 production Doclingが参照するmodel snapshot / artifactはlocal cacheから確認できませんでした。確認できたHugging Face cacheは本変換と無関係の音声認識modelのみです。指示どおりmodel downloadや取得requestを開始せず、production CLIによる変換とQuality Report生成は実行していません。
 
-このためreal Docling smokeは未完了です。これはGitHubソース公開の条件付き項目であり、wheel / PyPI / model再配布を許可する結果ではありません。
+このためreal Docling smokeは未完了のHuman Gateとして維持します。この未完了項目は、wheel / PyPI / model再配布を許可する結果ではありません。
 
 ## Offline確認結果
 

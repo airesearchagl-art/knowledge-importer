@@ -185,7 +185,7 @@ def test_public_release_gate_documents_keep_human_decisions_explicit() -> None:
 
     assert "[v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md)" in readme
     assert "[Third-party License Metadata Review](THIRD_PARTY_LICENSES_REVIEW.md)" in readme
-    assert "判定: **条件付きGitHubソース公開可**" in checklist
+    assert "判定: **GitHubソース公開継続可（Human Gate継続）**" in checklist
     assert "GitHub Release、wheel / sdist配布、PyPI公開" in checklist
     assert "real Docling" in checklist
     assert "法的判断を行いません" in license_review

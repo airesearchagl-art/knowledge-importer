@@ -1,6 +1,6 @@
 # Third-party License Metadata Review
 
-この一覧は、localにインストール済みのpackage metadata、同梱license file名、`pyproject.toml`、`uv.lock`から得た事実の記録です。SPDXや再配布条件を推測せず、法的判断を行いません。公開前に人による確認が必要です。
+この一覧は、localにインストール済みのpackage metadata、同梱license file名、`pyproject.toml`、`uv.lock`から得た事実の記録です。SPDXや再配布条件を推測せず、法的判断を行いません。public repositoryでのソース公開を継続する間も、人による確認が必要です。
 
 ## Projectと主要dependency
 
@@ -48,11 +48,11 @@ local環境の110 distributions中、次の10件はlicense metadata fieldが空�
 - tqdm 4.69.0: `MPL-2.0 AND MIT`
 - scipy 1.18.0: metadata内にbundled libraryとGCC Runtime Library Exceptionの記載
 
-## 公開前に人が確認する事項
+## 公開状態の継続と追加配布前に人が確認する事項
 
 - project MIT Licenseとcopyright表記の最終確認
 - Docling本体およびruntime transitive dependencyのlicense原文
 - binary wheelに含まれるnative libraryとnotice要件
 - model artifactのlicense、取得条件、再配布可否
-- 将来wheel / sdist / installerを公開する場合の配布形式（今回はGitHubソース公開のみ）
+- 将来wheel / sdist / installerを公開する場合の配布形式（現在はpublic GitHub repositoryでのソース公開のみ）
 - 必要なNOTICEまたはthird-party attributionの形式
