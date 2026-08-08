@@ -7,6 +7,8 @@ name = "knowledge-importer"
 version = "0.1.0"
 description = "Convert text-layer PDFs to Markdown locally."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "docling==2.113.0",

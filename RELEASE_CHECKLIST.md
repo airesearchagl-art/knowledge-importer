@@ -1,12 +1,20 @@
 # v0.1.0 Public Release Gate
 
-判定: **公開準備不可**
+判定: **GitHubソース公開継続可（Human Gate継続）**
 
-この文書はtag、GitHub Release、配布先への公開前に、人が確認する項目をまとめたものです。ライセンスや法的適合性を判断する文書ではありません。
+この文書は、既にpublicであるGitHub repositoryのソース公開状態を安全に継続するため、人が確認する項目をまとめたものです。repositoryをこれからpublicへ切り替えることを前提としません。ライセンスや法的適合性を判断する文書ではありません。GitHub Release、wheel / sdist配布、PyPI公開、model artifact再配布は別のHuman Gateが必要で、今回の対象外です。
+
+## 公開範囲
+
+- GitHub repositoryのソースコードのみ
+- project本体はMIT License
+- dependencyとmodel artifactは各配布元のlicense / termsに従う
+- Docling model artifactはrepository、wheel、sdistに含めず、再配布しない
 
 ## 確認済み
 
 - version metadataとpackage `__version__`: `0.1.0`
+- project MIT Licenseとpackage metadata: 反映済み
 - wheel / sdist build: 成功
 - wheel本体のoffline install、CLI help、package import: 成功
 - unit / integration / release-readiness tests: 成功
@@ -17,20 +25,28 @@
 
 ## 未完了のHuman Gate
 
-- [ ] project licenseを決定し、LICENSEとpackage metadataへ反映する
+- [x] project licenseをMITとし、`LICENSE`とpackage metadataへ反映する
 - [ ] `THIRD_PARTY_LICENSES_REVIEW.md`のunknown・再配布注意候補を人が確認する
-- [ ] Docling wheelとtransitive dependencyをoffline配布する方針を決定する
 - [ ] 必要なDocling model artifactを適法な方法で事前取得し、offline実変換を再検証する
-- [ ] 公開先、配布対象、Release Notes、tag作成者を決定する
-- [ ] 承認後にtag、GitHub Release、必要な配布先公開を別作業として実施する
+- [ ] Docling codeとruntime dependencyのlicense原文について最終的な人手確認を行う
+- [ ] ソース公開状態の継続前提として、各PRの最終diffを人が確認する
+
+wheel / sdistの公開配布、GitHub Release、PyPI、tag作成、model再配布を将来行う場合は、別作業としてdependency、native library、NOTICE、model termsを再確認します。
 
 ## 実Docling smoke結果
 
-2ページの架空PDFを使用しました。タイトル、2階層見出し、複数段落、3項目の箇条書き、3列の単純表、日本語とASCII、ページ遷移語句を含みます。PDFはテキスト層を持ち、画像レンダリングでも欠け・重なり・文字化けがないことを確認しました。
+GitHubソース公開状態の継続検証で、次の架空PDFを一時生成しました。すべてテキスト層を持ち、全9ページの画像レンダリングで欠け・重なり・文字化けがないことを確認しました。
 
-`HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`、`HF_DATASETS_OFFLINE=1`および`uv --offline`でproduction CLIを実行しました。必要なDocling model snapshotがlocal cacheに存在しなかったため、変換は終了コード`1`で停止しました。Markdownは生成されず、Quality JSONは`checked=0`の安全な空レポートでした。cache件数と容量に変化はなく、downloadは発生していません。
+| 架空PDF | 構成 | production Docling / Quality Report |
+|---|---|---|
+| Basic document | 見出し、段落、箇条書き、2ページ | model cache不足のため未実行 |
+| Table document | 3列4行の表、前後文、2ページ | model cache不足のため未実行 |
+| Japanese mixed document | 日本語、ASCII、箇条書き、表、2ページ | model cache不足のため未実行 |
+| Multi-section document | 3階層見出し、表、箇条書き、3ページ | model cache不足のため未実行 |
 
-このため、real Docling変換は公開前に再確認が必要です。ネットワークを有効化して回避した結果や、実資料による検証結果は含みません。
+production Doclingが参照するmodel snapshot / artifactはlocal cacheから確認できませんでした。確認できたHugging Face cacheは本変換と無関係の音声認識modelのみです。指示どおりmodel downloadや取得requestを開始せず、production CLIによる変換とQuality Report生成は実行していません。
+
+このためreal Docling smokeは未完了のHuman Gateとして維持します。この未完了項目は、wheel / PyPI / model再配布を許可する結果ではありません。
 
 ## Offline確認結果
 
@@ -41,7 +57,7 @@
 | CLI help / package import | 成功 |
 | 依存込み完全offline install | Docling wheelがuv cacheになく失敗 |
 | fake converter smoke | 成功 |
-| real Docling smoke | model snapshot不足で失敗 |
+| real Docling smoke | model snapshot不足のため未実行（過去のoffline検証でも同不足により失敗） |
 
 ## v0.1.0 Release Notes草案
 
@@ -64,4 +80,4 @@
 - 未OCR画像PDF、複雑な段組み、数式、複雑な表の再現を保証しない
 - 完全offline installと実変換には依存wheelとDocling model artifactの事前cacheが必要
 - real Docling offline smokeは必要model snapshot不足のため未完了
-- project licenseと公開先は未決定
+- GitHubソース公開以外の公開先・配布形式は対象外
