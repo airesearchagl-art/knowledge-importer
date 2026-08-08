@@ -252,6 +252,7 @@ uv build
 - PDFの複雑な段組み、表、数式ではMarkdownの再現性に差が出ます。初期版では表構造推論を無効化しています。
 - `do_ocr=False` のため、OCRされていない画像PDFやテキスト層が欠落・破損したPDFからは本文を抽出できません。
 - wheel本体は依存を含まないため、完全offline installにはDoclingとtransitive dependencyのwheelを事前にcacheする必要があります。実変換には、さらにDoclingが要求するmodel artifactの事前cacheが必要です。どちらかが不足する環境ではinstallまたは変換を開始できません。
+- Docling 2.113.0は既定layout modelを`revision="main"`で解決します。full revisionのsnapshotだけがcacheされ、`main` refがない状態では、artifactが存在しても完全offline初期化に失敗します。2026-08-08のmanual結果は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
 - 実資料、実案件名、実会社名、実個人名をリポジトリへ追加しないでください。
 - `input/`、`output/`、`logs/` の実ファイルはGit管理対象外です。
 
