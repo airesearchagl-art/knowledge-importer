@@ -28,6 +28,7 @@ EXPECTED_OPTIONS = (
     "--quality-warnings",
     "--quality-report-json",
     "--manifest-json",
+    "--normalize-markdown",
 )
 EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/__init__.py",
@@ -39,6 +40,7 @@ EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/logging_config.py",
     "knowledge_importer/main.py",
     "knowledge_importer/markdown_quality.py",
+    "knowledge_importer/markdown_normalization.py",
     "knowledge_importer/models.py",
     "knowledge_importer/quality_report.py",
 }

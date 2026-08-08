@@ -77,6 +77,19 @@ uv run knowledge-importer convert .\input --output .\output --force --table-stru
 
 一括変換では、既存のMarkdownファイルを`--force`なしで安全にスキップし、`--force`指定時だけ再生成して上書きします。ログは`logs/knowledge-importer.log`に保存します。
 
+### Opt-in Markdown normalization
+
+```powershell
+uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --normalize-markdown conservative
+uv run knowledge-importer convert .\input --output .\output --recursive --normalize-markdown conservative
+```
+
+`--normalize-markdown conservative`を明示した場合だけ、Doclingが生成したMarkdownへ決定的な後処理を適用します。未指定時は従来どおり生成bytesを変更しません。conservative profileはUTF-8 BOMを除去し、CRLF/CRをLFへ統一し、通常行の末尾タブと1個だけの末尾スペースを除去し、末尾の余分な空行を除いてファイル末尾を1改行に揃えます。Markdown hard breakになり得る2個以上の末尾スペースは保持します。
+
+backtick/tildeのfenced code block内では、全体の改行コード統一を除き、indent、行内容、末尾空白を変更しません。表のcell、pipe配置、alignment marker、見出し、list marker、inline code、link、HTML、frontmatterも書き換えません。Unicode NFCはcode・URL・識別子を変える可能性があるため、このprofileでは適用しません。
+
+正規化は変換後、品質検査とArtifact Manifest digest計算の前にatomic適用します。`--force`では再変換した出力へ適用します。既存出力をskipした場合はartifact非変更を優先して正規化せず、Manifestの`normalization_profile`はartifact生成履歴ではなく今回要求したglobal settingを表します。したがって、skipされた出力がそのprofileで生成済みであることは保証しません。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell
@@ -187,6 +200,8 @@ section/b.PDF,section/b.md,skipped,,既存の出力を保持しました。
 `--manifest-json PATH`は、今回選択されたPDFとMarkdownを下流ツールへ安全に渡すため、独立したArtifact Manifest schema version 1を生成します。単一PDFと一括変換の双方で利用でき、既存Batch JSON、CSV、Quality JSONとの同時指定も可能です。Local RAGなどへの登録・同期自体は行いません。
 
 Manifestはinput/outputのbyte数と、file bytesをそのままSHA-256で計算したlowercase digestを記録します。singleではfilename、batchでは各rootからの相対POSIX pathだけを使用します。timestamp、duration、hostname、username、cwd、command line、絶対path、model cache path、`--artifacts-path`の値は含めません。`--artifacts-path`は指定有無だけをbooleanで記録します。
+
+`settings.normalization_profile`は未指定時に`null`、`--normalize-markdown conservative`指定時に`"conservative"`です。正規化指定時のoutput digestは、品質検査と同じ最終正規化済みMarkdown bytesを表します。
 
 `succeeded`と`skipped`ではinput/output双方のdigestが必須です。`failed`では読み取れるinputだけを記録し、output digestは`null`です。Manifestを指定しない通常実行ではchecksum I/Oを追加しません。Manifest生成または書き込みに失敗した場合、変換statusを変更せず最終終了コードを`2`とし、既存Manifestはatomic writeで保護します。
 
