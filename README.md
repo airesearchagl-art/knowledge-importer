@@ -91,6 +91,7 @@ uv run knowledge-importer convert .\input --output .\output --recursive --includ
 uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json
 uv run knowledge-importer convert .\input --output .\output --report-csv .\reports\batch-result.csv
 uv run knowledge-importer convert .\input --output .\output --report-json .\reports\batch-result.json --report-csv .\reports\batch-result.csv
+uv run knowledge-importer convert .\input --output .\output --manifest-json .\reports\artifacts.json
 uv run knowledge-importer convert .\input --output .\output --quality-warnings
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --quality-report-json .\reports\sample-quality.json
 uv run knowledge-importer convert .\input --output .\output --quality-report-json .\reports\quality.json --quality-warnings
@@ -180,6 +181,16 @@ section/b.PDF,section/b.md,skipped,,既存の出力を保持しました。
 `input`と`output`には各ルートからのPOSIX形式相対パスだけを記録し、絶対パス、ユーザー名、tracebackなどは含めません。include/exclude対象外は記録せず、フィルタ適用後の対象が0件または入力ディレクトリ内にPDFがない場合もヘッダーだけのCSVを生成します。単一PDF変換では利用できません。
 
 `--report-json`と`--report-csv`は同時指定でき、変換を一度だけ実行して同じ内部結果を両形式へ出力します。ただし同じPATHを両方へ指定することはできません。各レポートは同じ親ディレクトリの一時ファイルから独立して原子的に置換されるため、一方の書き込み失敗で他方の正常なレポートは削除されません。JSONまたはCSVのどちらか一方でも書き込みに失敗した場合、最終終了コードは `2` です。
+
+### Artifact Manifest JSON
+
+`--manifest-json PATH`は、今回選択されたPDFとMarkdownを下流ツールへ安全に渡すため、独立したArtifact Manifest schema version 1を生成します。単一PDFと一括変換の双方で利用でき、既存Batch JSON、CSV、Quality JSONとの同時指定も可能です。Local RAGなどへの登録・同期自体は行いません。
+
+Manifestはinput/outputのbyte数と、file bytesをそのままSHA-256で計算したlowercase digestを記録します。singleではfilename、batchでは各rootからの相対POSIX pathだけを使用します。timestamp、duration、hostname、username、cwd、command line、絶対path、model cache path、`--artifacts-path`の値は含めません。`--artifacts-path`は指定有無だけをbooleanで記録します。
+
+`succeeded`と`skipped`ではinput/output双方のdigestが必須です。`failed`では読み取れるinputだけを記録し、output digestは`null`です。Manifestを指定しない通常実行ではchecksum I/Oを追加しません。Manifest生成または書き込みに失敗した場合、変換statusを変更せず最終終了コードを`2`とし、既存Manifestはatomic writeで保護します。
+
+同一のinput bytes、output bytes、status、設定からはbyte-identicalなJSONを生成します。既存reportや生成Markdownと同じ出力pathは変換開始前に拒否します。field定義と互換性方針は [Knowledge Artifact Manifest v1 Output Contract](docs/output-contract.md) を参照してください。
 
 ## OCR設定
 

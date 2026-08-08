@@ -27,10 +27,12 @@ EXPECTED_OPTIONS = (
     "--report-csv",
     "--quality-warnings",
     "--quality-report-json",
+    "--manifest-json",
 )
 EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/__init__.py",
     "knowledge_importer/__main__.py",
+    "knowledge_importer/artifact_manifest.py",
     "knowledge_importer/cli.py",
     "knowledge_importer/converter.py",
     "knowledge_importer/json_writer.py",
@@ -160,7 +162,8 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
             "-c",
             (
                 "from importlib.metadata import version; "
-                "import knowledge_importer.cli, knowledge_importer.json_writer, "
+                "import knowledge_importer.artifact_manifest, knowledge_importer.cli, "
+                "knowledge_importer.json_writer, "
                 "knowledge_importer.markdown_quality, knowledge_importer.quality_report; "
                 "print(version('knowledge-importer'))"
             ),

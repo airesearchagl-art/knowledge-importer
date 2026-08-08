@@ -13,6 +13,13 @@ from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
 
+from knowledge_importer.artifact_manifest import (
+    ArtifactManifest,
+    ArtifactManifestSettings,
+    ManifestStatus,
+    build_manifest_item,
+    write_artifact_manifest,
+)
 from knowledge_importer.converter import (
     Converter,
     build_docling_converter,
@@ -178,6 +185,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="生成Markdownの基礎品質検査結果を独立JSONファイルへ出力",
     )
+    convert_parser.add_argument(
+        "--manifest-json",
+        type=Path,
+        metavar="PATH",
+        help="変換artifactの決定的なManifest JSONを出力",
+    )
     return parser
 
 
@@ -222,6 +235,15 @@ def run(
                 file=sys.stderr,
             )
             return 2
+        if args.manifest_json is not None and any(
+            report_path is not None and _paths_are_equal(args.manifest_json, report_path)
+            for report_path in (args.report_json, args.report_csv, args.quality_report_json)
+        ):
+            print(
+                "エラー: Artifact Manifestと他のレポートには異なる出力先を指定してください",
+                file=sys.stderr,
+            )
+            return 2
         return _run_directory(
             args.input,
             args.output,
@@ -234,6 +256,7 @@ def run(
             report_csv=args.report_csv,
             quality_warnings=args.quality_warnings,
             quality_report_json=args.quality_report_json,
+            manifest_json=args.manifest_json,
             artifacts_path=args.artifacts_path,
             converter_factory=converter_factory,
         )
@@ -261,6 +284,17 @@ def run(
         )
         return 2
 
+    if args.manifest_json is not None and any(
+        report_path is not None and _paths_are_equal(args.manifest_json, report_path)
+        for report_path in (args.quality_report_json, args.output)
+    ):
+        print(
+            "エラー: Artifact ManifestとMarkdownまたは他のレポートには"
+            "異なる出力先を指定してください",
+            file=sys.stderr,
+        )
+        return 2
+
     request = ConversionRequest(
         input_path=args.input,
         output_path=args.output,
@@ -272,6 +306,7 @@ def run(
         do_table_structure=args.table_structure,
         quality_warnings=args.quality_warnings,
         quality_report_json=args.quality_report_json,
+        manifest_json=args.manifest_json,
         artifacts_path=args.artifacts_path,
     )
 
@@ -287,6 +322,65 @@ def _create_converter(
     return converter_factory(do_table_structure, artifacts_path)
 
 
+def _manifest_settings(
+    *,
+    recursive: bool,
+    include_patterns: Sequence[str],
+    exclude_patterns: Sequence[str],
+    force: bool,
+    do_table_structure: bool,
+    artifacts_path: Path | None,
+) -> ArtifactManifestSettings:
+    return ArtifactManifestSettings(
+        recursive=recursive,
+        include=tuple(include_patterns),
+        exclude=tuple(exclude_patterns),
+        force=force,
+        table_structure=do_table_structure,
+        artifacts_path_configured=artifacts_path is not None,
+        normalization_profile=None,
+    )
+
+
+def _single_artifact_manifest(
+    request: ConversionRequest,
+    *,
+    status: ManifestStatus,
+    settings: ArtifactManifestSettings,
+    failure: BatchFailure | None = None,
+) -> ArtifactManifest:
+    return ArtifactManifest(
+        settings=settings,
+        items=(
+            build_manifest_item(
+                input_path=request.input_path,
+                output_path=request.output_path,
+                input_name=request.input_path.name,
+                output_name=request.output_path.name,
+                status=status,
+                error_category=failure.category.value if failure is not None else None,
+                message=failure.reason if failure is not None else None,
+            ),
+        ),
+    )
+
+
+def _write_artifact_manifest_safely(
+    report_path: Path,
+    manifest_factory: Callable[[], ArtifactManifest],
+) -> bool:
+    try:
+        write_artifact_manifest(report_path, manifest_factory())
+    except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+        LOGGER.error(
+            "artifact_manifest_write_failed exception_type=%s",
+            type(exc).__name__,
+        )
+        print("Artifact Manifestを書き込めませんでした。", file=sys.stderr)
+        return False
+    return True
+
+
 def _convert_request(
     request: ConversionRequest,
     converter: Converter | None = None,
@@ -297,6 +391,7 @@ def _convert_request(
     batch: bool = False,
     quality_warnings: bool = False,
     quality_report_json: Path | None = None,
+    manifest_json: Path | None = None,
 ) -> int:
     LOGGER.info(
         "conversion_start input=%s output=%s",
@@ -304,6 +399,14 @@ def _convert_request(
         request.output_path,
     )
 
+    settings = _manifest_settings(
+        recursive=False,
+        include_patterns=(),
+        exclude_patterns=(),
+        force=request.force,
+        do_table_structure=do_table_structure,
+        artifacts_path=artifacts_path,
+    )
     validation_succeeded = False
     try:
         validate_request(request)
@@ -326,8 +429,25 @@ def _convert_request(
         )
         prefix = f"{request.input_path}: " if batch else ""
         print(f"エラー: {prefix}{exc}", file=sys.stderr)
+        report_failed = False
         if validation_succeeded and quality_report_json is not None:
-            _write_quality_report_safely(quality_report_json, QualityReport(()))
+            report_failed = not _write_quality_report_safely(quality_report_json, QualityReport(()))
+        if validation_succeeded and manifest_json is not None:
+            failure = _classify_batch_failure(exc, request)
+            report_failed = (
+                not _write_artifact_manifest_safely(
+                    manifest_json,
+                    lambda: _single_artifact_manifest(
+                        request,
+                        status=ManifestStatus.FAILED,
+                        settings=settings,
+                        failure=failure,
+                    ),
+                )
+                or report_failed
+            )
+        if report_failed:
+            return 2
         return 2
     except Exception as exc:  # noqa: BLE001 - CLI boundary must produce a stable exit code.
         LOGGER.exception(
@@ -343,11 +463,24 @@ def _convert_request(
             )
         else:
             print(f"変換に失敗しました ({type(exc).__name__}): {exc}", file=sys.stderr)
-        if (
-            validation_succeeded
-            and quality_report_json is not None
-            and not _write_quality_report_safely(quality_report_json, QualityReport(()))
-        ):
+        report_failed = False
+        if validation_succeeded and quality_report_json is not None:
+            report_failed = not _write_quality_report_safely(quality_report_json, QualityReport(()))
+        if validation_succeeded and manifest_json is not None:
+            failure = _classify_batch_failure(exc, request)
+            report_failed = (
+                not _write_artifact_manifest_safely(
+                    manifest_json,
+                    lambda: _single_artifact_manifest(
+                        request,
+                        status=ManifestStatus.FAILED,
+                        settings=settings,
+                        failure=failure,
+                    ),
+                )
+                or report_failed
+            )
+        if report_failed:
             return 2
         return 1
 
@@ -363,6 +496,7 @@ def _convert_request(
         request.output_path,
     )
     print(f"変換しました: {request.output_path}")
+    report_failed = False
     if quality_report_json is not None:
         report = QualityReport(
             (
@@ -373,9 +507,20 @@ def _convert_request(
                 ),
             )
         )
-        if not _write_quality_report_safely(quality_report_json, report):
-            return 2
-    return 0
+        report_failed = not _write_quality_report_safely(quality_report_json, report)
+    if manifest_json is not None:
+        report_failed = (
+            not _write_artifact_manifest_safely(
+                manifest_json,
+                lambda: _single_artifact_manifest(
+                    request,
+                    status=ManifestStatus.SUCCEEDED,
+                    settings=settings,
+                ),
+            )
+            or report_failed
+        )
+    return 2 if report_failed else 0
 
 
 def _is_linked_directory(path: Path) -> bool:
@@ -777,6 +922,34 @@ def _write_batch_csv(report_path: Path, result: BatchResult) -> None:
         raise
 
 
+def _batch_artifact_manifest(
+    result: BatchResult,
+    requests: Sequence[ConversionRequest],
+    *,
+    settings: ArtifactManifestSettings,
+) -> ArtifactManifest:
+    status_map = {
+        BatchItemStatus.SUCCEEDED: ManifestStatus.SUCCEEDED,
+        BatchItemStatus.SKIPPED: ManifestStatus.SKIPPED,
+        BatchItemStatus.FAILED: ManifestStatus.FAILED,
+    }
+    items = tuple(
+        build_manifest_item(
+            input_path=request.input_path,
+            output_path=request.output_path,
+            input_name=result_item.input_name,
+            output_name=result_item.output_name,
+            status=status_map[result_item.status],
+            error_category=(
+                result_item.error_category.value if result_item.error_category is not None else None
+            ),
+            message=result_item.message,
+        )
+        for request, result_item in zip(requests, result.items, strict=True)
+    )
+    return ArtifactManifest(settings=settings, items=items)
+
+
 def _write_requested_reports(
     result: BatchResult,
     *,
@@ -784,6 +957,8 @@ def _write_requested_reports(
     report_csv: Path | None,
     quality_report_json: Path | None = None,
     quality_report: QualityReport | None = None,
+    manifest_json: Path | None = None,
+    manifest_factory: Callable[[], ArtifactManifest] | None = None,
 ) -> bool:
     report_failed = False
     if quality_report_json is not None and not _write_quality_report_safely(
@@ -802,6 +977,11 @@ def _write_requested_reports(
                 type(exc).__name__,
             )
             print("CSVレポートを書き込めませんでした。", file=sys.stderr)
+    if manifest_json is not None:
+        if manifest_factory is None:
+            raise RuntimeError("Artifact Manifest factoryが必要です")
+        if not _write_artifact_manifest_safely(manifest_json, manifest_factory):
+            report_failed = True
     if report_json is not None:
         try:
             _write_batch_report(
@@ -826,6 +1006,8 @@ def _finish_batch(
     report_csv: Path | None,
     quality_report_json: Path | None,
     quality_report: QualityReport,
+    manifest_json: Path | None,
+    manifest_factory: Callable[[], ArtifactManifest] | None,
 ) -> int:
     print(_format_batch_summary(result))
     report_failed = _write_requested_reports(
@@ -834,6 +1016,8 @@ def _finish_batch(
         report_csv=report_csv,
         quality_report_json=quality_report_json,
         quality_report=quality_report,
+        manifest_json=manifest_json,
+        manifest_factory=manifest_factory,
     )
     return 2 if report_failed else result.exit_code
 
@@ -913,9 +1097,18 @@ def _run_directory(
     report_csv: Path | None,
     quality_warnings: bool,
     quality_report_json: Path | None,
+    manifest_json: Path | None,
     artifacts_path: Path | None,
     converter_factory: Callable[..., Converter],
 ) -> int:
+    manifest_settings = _manifest_settings(
+        recursive=recursive,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+        force=force,
+        do_table_structure=do_table_structure,
+        artifacts_path=artifacts_path,
+    )
     try:
         requests = _build_batch_requests(
             input_dir,
@@ -934,13 +1127,15 @@ def _run_directory(
             type(exc).__name__,
         )
         print(f"エラー: 分類={exc.category.value} 理由={exc}", file=sys.stderr)
-        if report_csv is not None or quality_report_json is not None:
+        if report_csv is not None or quality_report_json is not None or manifest_json is not None:
             _write_requested_reports(
                 BatchResult(()),
                 report_json=None,
                 report_csv=report_csv,
                 quality_report_json=quality_report_json,
                 quality_report=QualityReport(()),
+                manifest_json=manifest_json,
+                manifest_factory=lambda: ArtifactManifest(manifest_settings, ()),
             )
         return 2
     except _BatchSetupError as exc:
@@ -959,6 +1154,15 @@ def _run_directory(
     ):
         print(
             "エラー: 品質レポートとMarkdown出力には異なる出力先を指定してください",
+            file=sys.stderr,
+        )
+        return 2
+
+    if manifest_json is not None and any(
+        _paths_are_equal(manifest_json, request.output_path) for request in requests
+    ):
+        print(
+            "エラー: Artifact ManifestとMarkdown出力には異なる出力先を指定してください",
             file=sys.stderr,
         )
         return 2
@@ -1031,6 +1235,12 @@ def _run_directory(
                 report_csv,
                 quality_report_json,
                 QualityReport(()),
+                manifest_json,
+                lambda: _batch_artifact_manifest(
+                    result,
+                    requests,
+                    settings=manifest_settings,
+                ),
             )
     else:
         converter = None
@@ -1093,4 +1303,10 @@ def _run_directory(
         report_csv,
         quality_report_json,
         QualityReport(tuple(quality_items)),
+        manifest_json,
+        lambda: _batch_artifact_manifest(
+            result,
+            requests,
+            settings=manifest_settings,
+        ),
     )
