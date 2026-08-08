@@ -1,69 +1,87 @@
 # Third-party License Metadata Review
 
-この一覧は、localにインストール済みのpackage metadata、同梱license file名、`pyproject.toml`、`uv.lock`から得た事実の記録です。SPDXや再配布条件を推測せず、法的判断を行いません。public repositoryでのソース公開を継続する間も、人による確認が必要です。
+確認日: 2026-08-09
 
-## Projectと主要dependency
+判定: **条件付きGitHubソース公開継続可**
 
-| 対象 | Version / 範囲 | Metadata上のlicense | License file | Metadata URL | 用途・確認事項 |
-|---|---:|---|---:|---|---|
-| knowledge-importer | 0.1.0 | MIT | `LICENSE` | repository | `Copyright (c) 2026 airesearchagl-art`とpackage metadataに反映済み |
-| docling | 2.113.0 | MIT | metadataから未検出 | https://github.com/docling-project/docling | 唯一のruntime direct dependency。Docling codeのmetadata上の記録であり、model artifactには適用しない |
-| argparse | Python 3.12標準library | package metadata対象外 | package外 | metadata対象外 | CLI framework。Python自体を同梱配布する場合は別途確認 |
-| reportlab | 5.0.0 | BSD licenseとの記載 | 4件検出 | https://www.reportlab.com/ | dev dependency、合成PDF生成用。license.txt原文確認が必要 |
-| pypdf | 6.14.2 | BSD-3-Clause | 1件検出 | https://github.com/py-pdf/pypdf | dev dependency、PDFテキスト層検査用 |
-| pytest | 8.4.2 | MIT | 1件検出 | https://github.com/pytest-dev/pytest | dev / test tooling |
-| ruff | 0.12.12 | unknown | 1件検出 | https://github.com/astral-sh/ruff | dev tooling。metadata fieldが空のため原文確認が必要 |
-| uv_build | >=0.11.0,<0.12.0 | unknown | local metadata未取得 | local metadata未取得 | build backend。公開前に使用versionと原文確認が必要 |
+この一覧は、Knowledge Importerの実変換経路について、localにインストール済みのpackage metadata、同梱license / notice file、公式配布元の原文を突き合わせた事実の記録です。法的判断を行いません。SPDX、個別artifactへの適用範囲、再配布可否を推測しません。
 
-wheelのmemberは`knowledge_importer` package、dist-info、project `LICENSE`だけで、第三者packageのsource code同梱は検出されません。sdistにもproject `LICENSE`を含めます。利用者がinstallするDoclingのtransitive dependencyは別途確認対象です。
+## 判定の範囲
+
+- GitHub repositoryはKnowledge Importer自身のMIT sourceと文書だけを公開し、third-party codeやruntime wheelを同梱していません。
+- project wheel / sdistにもdependency wheel、native library、model artifactを同梱していません。
+- Docling model artifactはrepository、wheel、sdistへ含めず、本projectから再配布しません。
+- したがって、現在のsource-only公開は継続できます。
+- GitHub Release、wheel / sdist、PyPI、依存packageを含むbinary、installer、model artifactの配布はこの判定に含めません。対象物に応じた原文license、NOTICE、attribution、再配布条件の別Human Gateが必要です。
+
+## Projectとdirect dependency
+
+| 対象 | Version | Installed metadata | Local license evidence | 公式参照 | Source-only判断 |
+|---|---:|---|---|---|---|
+| knowledge-importer | 0.1.0 | MIT | repository `LICENSE` | repository | project sourceへ反映済み |
+| docling | 2.113.0 | `License-Expression: MIT` | installed metadataではlicense file未検出 | https://github.com/docling-project/docling | direct runtime dependency。codeのlicenseでありmodelには適用しない |
+
+`pyproject.toml`のruntime direct dependencyは`docling==2.113.0`だけです。build済みwheelのmemberは`knowledge_importer` package、dist-info、project `LICENSE`で、第三者package sourceやmodel artifactの同梱は検出されません。sdistにもproject `LICENSE`を含めます。
+
+## 実変換経路の主要runtime dependency
+
+無制限なtransitive dependency監査は行わず、Doclingの通常PDF変換と検証済みTableFormer経路で主要なinstalled distributionへ範囲を限定しました。versionとlicense表記は今回のlocal環境で観測した値です。
+
+| Distribution | Version | Installed metadata | Local license / notice evidence | Binary配布時の注意 |
+|---|---:|---|---|---|
+| docling-core | 2.87.1 | MIT | `dist-info/licenses/LICENSE` | 原文保持を確認する |
+| docling-slim | 2.113.0 | MIT | `dist-info/licenses/LICENSE` | 原文保持を確認する |
+| docling-ibm-models | 3.13.3 | MIT | `dist-info/licenses/LICENSE` | codeとmodel artifactの条件を混同しない |
+| docling-parse | 7.8.0 | MIT | project LICENSE、CMap resources LICENSE | resourceごとの原文保持を確認する |
+| torch | 2.13.0 | Apache-2.0、LLVM exception、BSD、BSL、MITを含むSPDX式 | project LICENSEと多数の`third_party` license | wheelごとの構成とNOTICEを個別監査する |
+| transformers | 5.8.1 | Apache 2.0 | `dist-info/licenses/LICENSE` | 原文とNOTICE有無を対象versionで確認する |
+| huggingface-hub | 1.24.0 | Apache-2.0 | `dist-info/licenses/LICENSE` | 原文とNOTICE有無を対象versionで確認する |
+| safetensors | 0.8.0 | classifier: Apache Software License | `dist-info/licenses/LICENSE` | metadata fieldが空のため原文を優先する |
+| pypdfium2 | 5.12.1 | BSD-3-Clause、Apache-2.0、dependency licenses | project licenses、Windows PDFium build licenses | binary buildに応じたPDFiumとdependency license一式を保持する |
+| opencv-python | 5.0.0.93 | Apache 2.0 | `LICENSE.txt`、`LICENSE-3RD-PARTY.txt` | platform wheelに含まれるthird-party binaryの原文を確認する |
+
+公式参照:
+
+- Docling family: https://github.com/docling-project
+- PyTorch license / notices: https://github.com/pytorch/pytorch/blob/main/LICENSE, https://github.com/pytorch/pytorch/blob/main/NOTICE
+- Transformers: https://github.com/huggingface/transformers/blob/main/LICENSE
+- Hugging Face Hub: https://github.com/huggingface/huggingface_hub/blob/main/LICENSE
+- Safetensors: https://github.com/huggingface/safetensors/blob/main/LICENSE
+- pypdfium2 licensing: https://github.com/pypdfium2-team/pypdfium2#licensing
+- opencv-python third-party notices: https://github.com/opencv/opencv-python/blob/4.x/LICENSE-3RD-PARTY.txt
+
+この表はinstalled metadataと同梱ファイルの存在確認であり、配布物ごとの法的適合性を保証しません。特にPyTorch、pypdfium2、opencv-pythonはnative binaryや多数のthird-party componentを含み得るため、binaryをまとめて公開する場合は対象platform・対象wheelを固定して再監査します。
 
 ## Docling codeとmodel artifactの分離
 
-Docling 2.113.0のcodeはlocal package metadata上MITです。一方、Doclingが利用するmodel artifactはDocling codeとは別の配布物であり、Knowledge ImporterのMIT LicenseやDocling codeのlicenseからmodelごとの条件を推測しません。
-
-Knowledge Importerのrepository、wheel、sdistにmodel artifactは含めず、本projectから再配布しません。利用者によるmodel取得・利用前に、対象modelのlicense、terms、取得条件のmanual verificationが必要です。
+Docling 2.113.0のcodeはlocal package metadata上MITです。一方、Doclingが利用するmodel artifactはDocling codeとは別の配布物です。Knowledge ImporterのMIT LicenseやDocling codeのMITからmodelごとの条件を推測しません。
 
 ### Manual smokeで確認したmodel revision
 
-| 用途 | Repository | 固定revision | Metadata上のlicense | Human Gate |
-|---|---|---|---|---|
-| Layout Heron | `docling-project/docling-layout-heron` | `1907ed0d4f5ef93ada62374230490e95c599fceb` | Apache-2.0 | model cardとApache-2.0原文を人が確認する |
-| TableFormer V1 accurate | `docling-project/docling-models` | `fc0f2d45e2218ea24bce5045f58a389aed16dc23`（`v2.3.0`） | CDLA-Permissive-2.0 / Apache-2.0 | `model_artifacts/tableformer/accurate`へ適用される条件をmodel card・原文から人が確認する |
+| 用途 | Repository | 固定revision | Fixed revisionのmetadata | Fixed snapshot内の原文 | Human Gate |
+|---|---|---|---|---|---|
+| Layout Heron | `docling-project/docling-layout-heron` | `1907ed0d4f5ef93ada62374230490e95c599fceb` | `apache-2.0` | READMEあり、独立したLICENSE / NOTICEなし | model card、Apache-2.0原文、attribution、再配布条件を人が確認する |
+| TableFormer V1 accurate | `docling-project/docling-models` | `fc0f2d45e2218ea24bce5045f58a389aed16dc23`（requested `v2.3.0`） | `cdla-permissive-2.0` | READMEあり、独立したLICENSE / NOTICEなし | CDLA-Permissive-2.0原文とweight / configへの適用関係を人が確認する |
 
-上記licenseはmodel repository metadataの記録であり、個別artifactへの適用関係や再配布可否を判断するものではありません。特に`docling-models`は複数license表記があるため、TableFormer weightとconfigに適用される原文条件を確認する必要があります。
+TableFormerについて、固定revisionのmetadataは`CDLA-Permissive-2.0`のみです。現在のmodel repositoryにある`CDLA-Permissive-2.0 / Apache-2.0`の併記は固定revisionより後のmetadata変更であるため、検証済みrevisionへ遡って適用されるとは扱いません。HeronもTableFormerもmetadata labelだけを原文licenseの代替にしません。
 
-2026-08-09のmanual smokeでは、両snapshotの必要artifactとREADMEをrepository外の一時local artifacts rootへ配置し、Docling 2.113.0の`PdfPipelineOptions.artifacts_path`から通常モードとTableFormerモードを完全offlineで実行しました。model download、cache ref追加、repositoryへのcopyは行っていません。検証用一時copyは配布せず、検証後に削除します。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
+公式参照:
 
-## Metadataがunknownだったinstalled distribution
+- Heron model card: https://huggingface.co/docling-project/docling-layout-heron
+- TableFormer fixed tag: https://huggingface.co/docling-project/docling-models/tree/v2.3.0
+- TableFormer license metadata変更: https://huggingface.co/docling-project/docling-models/commit/72baa83f6a61df0b1c46f627d391e98659202095
+- Hugging Face model card metadata: https://huggingface.co/docs/hub/model-cards
+- Apache License 2.0原文: https://www.apache.org/licenses/LICENSE-2.0
+- CDLA-Permissive-2.0原文: https://cdla.dev/permissive-2-0/
 
-local環境の110 distributions中、次の10件はlicense metadata fieldが空または判別不能でした。license fileが存在する場合でも、metadataだけでは断定していません。
+2026-08-09のmanual smokeでは、両snapshotの必要artifactとREADMEをrepository外の一時local artifacts rootへ配置し、Docling 2.113.0の`PdfPipelineOptions.artifacts_path`から通常モードとTableFormerモードを完全offlineで実行しました。model download、cache ref追加、repositoryへのcopyは行っていません。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
 
-- annotated-types 0.7.0
-- colorama 0.4.6
-- Jinja2 3.1.6
-- markdown-it-py 4.2.0
-- mdurl 0.1.2
-- omegaconf 2.3.1
-- ruff 0.12.12
-- safetensors 0.8.0
-- tokenizers 0.22.2
-- tree-sitter 0.26.0
+## 未解消のHuman Gate
 
-`tokenizers`はlicense fileもmetadataから検出できませんでした。package配布元の原文確認が必要です。
+- fixed model revisionに適用される原文license、NOTICE、attribution、利用・再配布条件
+- TableFormer weight / configへCDLA-Permissive-2.0が適用される範囲
+- dependency wheelを同梱するbinary配布時の、対象platform別native libraryとthird-party notice
+- GitHub Release、wheel / sdist、PyPI、installer、model artifact再配布の個別判断
+- 各公開操作直前の最終diffと配布物内容の確認
 
-## 再配布上の注意候補
-
-文字列ベースのmetadata確認では、以下が追加確認候補です。これはcopyleft適用や公開可否を判断するものではありません。
-
-- certifi 2026.6.17: `MPL-2.0`
-- tqdm 4.69.0: `MPL-2.0 AND MIT`
-- scipy 1.18.0: metadata内にbundled libraryとGCC Runtime Library Exceptionの記載
-
-## 公開状態の継続と追加配布前に人が確認する事項
-
-- project MIT Licenseとcopyright表記の最終確認
-- Docling本体およびruntime transitive dependencyのlicense原文
-- binary wheelに含まれるnative libraryとnotice要件
-- model artifactのlicense、取得条件、再配布可否
-- 将来wheel / sdist / installerを公開する場合の配布形式（現在はpublic GitHub repositoryでのソース公開のみ）
-- 必要なNOTICEまたはthird-party attributionの形式
+`unknown`やmetadata欠落は法的結論へ置き換えません。必要な原文を取得・確認できない対象は、その対象物を配布しない状態を維持します。

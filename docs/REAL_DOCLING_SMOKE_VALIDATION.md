@@ -116,12 +116,14 @@ model download、snapshot download、token利用、cache ref追加、cache metad
 
 ## 公開判断と残るHuman Gate
 
-GitHubソース公開は継続可能です。Knowledge Importerはmodel artifactを同梱・再配布せず、`--artifacts-path`は利用者が適法に取得したlocal artifactの参照だけを提供します。
+判定: **条件付きGitHubソース公開継続可**
+
+Knowledge Importerは第三者code、runtime wheel、model artifactをrepositoryへ同梱・再配布せず、`--artifacts-path`は利用者が適法に取得したlocal artifactの参照だけを提供します。この条件下でGitHubソース公開を継続できます。
 
 引き続き人が確認する項目:
 
 - Heron model cardとApache-2.0原文
-- TableFormer V1 accurateへ適用されるCDLA-Permissive-2.0 / Apache-2.0原文
+- TableFormer V1 accurateの固定revisionでmetadataに記録されたCDLA-Permissive-2.0原文と、weight / configへの適用関係
 - Doclingおよび主要runtime dependencyのlicense原文とNOTICE要件
 - 実資料を使う組織内検証は、repository外かつ適切な権限・取扱規則のもとで別途実施
-- GitHub Release、wheel / sdist公開、PyPI、model再配布は別Human Gate
+- GitHub Release、wheel / sdist公開、PyPI、依存packageを含むbinary、model再配布は別Human Gate
