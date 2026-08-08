@@ -27,12 +27,12 @@ Knowledge Importerのrepository、wheel、sdistにmodel artifactは含めず、�
 
 | 用途 | Repository | 固定revision | Metadata上のlicense | Human Gate |
 |---|---|---|---|---|
-| Layout Heron | `docling-project/docling-layout-heron` | `1907ed0d4f5ef93ada62374230490e95c599fceb` | Apache-2.0 | model cardと原文license、Doclingの`main`指定との対応付けを人が確認する |
+| Layout Heron | `docling-project/docling-layout-heron` | `1907ed0d4f5ef93ada62374230490e95c599fceb` | Apache-2.0 | model cardとApache-2.0原文を人が確認する |
 | TableFormer V1 accurate | `docling-project/docling-models` | `fc0f2d45e2218ea24bce5045f58a389aed16dc23`（`v2.3.0`） | CDLA-Permissive-2.0 / Apache-2.0 | `model_artifacts/tableformer/accurate`へ適用される条件をmodel card・原文から人が確認する |
 
 上記licenseはmodel repository metadataの記録であり、個別artifactへの適用関係や再配布可否を判断するものではありません。特に`docling-models`は複数license表記があるため、TableFormer weightとconfigに適用される原文条件を確認する必要があります。
 
-2026-08-08のmanual smokeでは両snapshotがrepository外のlocal cacheに存在することを確認しましたが、Heronに`main` refがなく完全offline初期化は失敗しました。model download、cache ref追加、repositoryへのcopyは行っていません。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
+2026-08-09のmanual smokeでは、両snapshotの必要artifactとREADMEをrepository外の一時local artifacts rootへ配置し、Docling 2.113.0の`PdfPipelineOptions.artifacts_path`から通常モードとTableFormerモードを完全offlineで実行しました。model download、cache ref追加、repositoryへのcopyは行っていません。検証用一時copyは配布せず、検証後に削除します。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
 
 ## Metadataがunknownだったinstalled distribution
 

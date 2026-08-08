@@ -43,9 +43,30 @@ uv run knowledge-importer --help
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md
 uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --force
 uv run knowledge-importer convert .\input\table.pdf --output .\output\table.md --table-structure
+uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --artifacts-path D:\docling-artifacts
 ```
 
 単一PDF変換では、既存出力は`--force`なしでは上書きせずエラーにします。`--table-structure`を指定した場合のみDocling TableFormerによる表構造推論を有効化します。表の行・列をMarkdown表として保持しやすくなる一方、初回は追加モデルの取得が発生する可能性があり、通常モードより処理時間とディスク使用量が増えます。
+
+`--artifacts-path PATH`を指定すると、Doclingが事前取得済みmodel artifactをローカルディレクトリから読み込みます。PATHは存在するディレクトリである必要があり、単一PDF、一括変換、`--table-structure`のすべてで利用できます。未指定時は従来どおりDocling既定のmodel解決を使います。PATH自体はJSON、CSV、Quality JSON、BatchResultへ記録しません。
+
+Docling 2.113.0で確認した推奨配置は次のとおりです。`--artifacts-path`には、この2ディレクトリを含む共通rootを指定します。
+
+```text
+docling-artifacts/
+├─ docling-project--docling-layout-heron/
+│  ├─ config.json
+│  ├─ preprocessor_config.json
+│  └─ model.safetensors
+└─ docling-project--docling-models/
+   └─ model_artifacts/
+      └─ tableformer/
+         └─ accurate/
+            ├─ tm_config.json
+            └─ tableformer_accurate.safetensors
+```
+
+model artifactはこのrepositoryや配布packageへコピーせず、各modelのlicense・termsを確認したうえでrepository外に保管してください。
 
 ### Batch conversion
 
@@ -252,7 +273,7 @@ uv build
 - PDFの複雑な段組み、表、数式ではMarkdownの再現性に差が出ます。初期版では表構造推論を無効化しています。
 - `do_ocr=False` のため、OCRされていない画像PDFやテキスト層が欠落・破損したPDFからは本文を抽出できません。
 - wheel本体は依存を含まないため、完全offline installにはDoclingとtransitive dependencyのwheelを事前にcacheする必要があります。実変換には、さらにDoclingが要求するmodel artifactの事前cacheが必要です。どちらかが不足する環境ではinstallまたは変換を開始できません。
-- Docling 2.113.0は既定layout modelを`revision="main"`で解決します。full revisionのsnapshotだけがcacheされ、`main` refがない状態では、artifactが存在しても完全offline初期化に失敗します。2026-08-08のmanual結果は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
+- Docling 2.113.0の既定model解決はlayout modelの`revision="main"`を参照するため、full revisionのsnapshotだけでは完全offline初期化に失敗します。`--artifacts-path`でfixed snapshot由来の正式なlocal artifacts構造を指定した2026-08-09のmanual smokeでは、通常モード4件、TableFormerモード2件、offline再実行に成功しました。詳細は [Real Docling Smoke Validation](docs/REAL_DOCLING_SMOKE_VALIDATION.md) を参照してください。
 - 実資料、実案件名、実会社名、実個人名をリポジトリへ追加しないでください。
 - `input/`、`output/`、`logs/` の実ファイルはGit管理対象外です。
 

@@ -131,6 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Doclingの表構造推論を有効化（追加モデルと処理時間が必要）",
     )
     convert_parser.add_argument(
+        "--artifacts-path",
+        type=Path,
+        metavar="PATH",
+        help="Doclingの事前取得済みlocal model artifactsルート",
+    )
+    convert_parser.add_argument(
         "--recursive",
         action="store_true",
         help="入力ディレクトリ配下のPDFを再帰的に変換",
@@ -187,9 +193,15 @@ def _paths_are_equal(first: Path, second: Path) -> bool:
 def run(
     argv: Sequence[str] | None = None,
     *,
-    converter_factory: Callable[[bool], Converter] = build_docling_converter,
+    converter_factory: Callable[..., Converter] = build_docling_converter,
 ) -> int:
     args = build_parser().parse_args(argv)
+    if args.artifacts_path is not None and not args.artifacts_path.is_dir():
+        print(
+            "エラー: --artifacts-pathには存在するローカルディレクトリを指定してください",
+            file=sys.stderr,
+        )
+        return 2
     if args.input.is_dir():
         if (
             args.report_json is not None
@@ -222,6 +234,7 @@ def run(
             report_csv=args.report_csv,
             quality_warnings=args.quality_warnings,
             quality_report_json=args.quality_report_json,
+            artifacts_path=args.artifacts_path,
             converter_factory=converter_factory,
         )
 
@@ -259,15 +272,28 @@ def run(
         do_table_structure=args.table_structure,
         quality_warnings=args.quality_warnings,
         quality_report_json=args.quality_report_json,
+        artifacts_path=args.artifacts_path,
     )
+
+
+def _create_converter(
+    converter_factory: Callable[..., Converter],
+    *,
+    do_table_structure: bool,
+    artifacts_path: Path | None,
+) -> Converter:
+    if artifacts_path is None:
+        return converter_factory(do_table_structure)
+    return converter_factory(do_table_structure, artifacts_path)
 
 
 def _convert_request(
     request: ConversionRequest,
     converter: Converter | None = None,
     *,
-    converter_factory: Callable[[bool], Converter] | None = None,
+    converter_factory: Callable[..., Converter] | None = None,
     do_table_structure: bool = False,
+    artifacts_path: Path | None = None,
     batch: bool = False,
     quality_warnings: bool = False,
     quality_report_json: Path | None = None,
@@ -285,7 +311,11 @@ def _convert_request(
         if converter is None:
             if converter_factory is None:
                 raise RuntimeError("converterまたはconverter factoryが必要です")
-            converter = converter_factory(do_table_structure)
+            converter = _create_converter(
+                converter_factory,
+                do_table_structure=do_table_structure,
+                artifacts_path=artifacts_path,
+            )
         convert_file(request, converter)
     except KnowledgeImporterError as exc:
         LOGGER.error(
@@ -883,7 +913,8 @@ def _run_directory(
     report_csv: Path | None,
     quality_warnings: bool,
     quality_report_json: Path | None,
-    converter_factory: Callable[[bool], Converter],
+    artifacts_path: Path | None,
+    converter_factory: Callable[..., Converter],
 ) -> int:
     try:
         requests = _build_batch_requests(
@@ -961,7 +992,11 @@ def _run_directory(
 
     if pending_requests:
         try:
-            converter = converter_factory(do_table_structure)
+            converter = _create_converter(
+                converter_factory,
+                do_table_structure=do_table_structure,
+                artifacts_path=artifacts_path,
+            )
         except Exception as exc:  # noqa: BLE001 - CLI boundary must produce a stable exit code.
             failures = [
                 BatchFailure(

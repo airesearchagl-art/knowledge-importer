@@ -19,6 +19,7 @@ from knowledge_importer.cli import run
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_OPTIONS = (
+    "--artifacts-path",
     "--recursive",
     "--include",
     "--exclude",
@@ -197,13 +198,15 @@ def test_public_release_gate_documents_keep_human_decisions_explicit() -> None:
     assert "docling-project/docling-layout-heron" in license_review
     assert "docling-project/docling-models" in license_review
     assert "model download、cache ref追加、repositoryへのcopyは行っていません" in license_review
-    assert "full revisionのsnapshotだけがcacheされ" in readme
+    assert "--artifacts-path" in readme
+    assert "通常モード4件、TableFormerモード2件、offline再実行に成功" in readme
 
     smoke_validation = (REPOSITORY_ROOT / "docs" / "REAL_DOCLING_SMOKE_VALIDATION.md").read_text(
         encoding="utf-8"
     )
-    assert "判定: **failed**" in smoke_validation
-    assert "LocalEntryNotFoundError" in smoke_validation
+    assert "判定: **pass with limitations**" in smoke_validation
+    assert "succeeded=4" in smoke_validation
+    assert "checked=4" in smoke_validation
     assert "modelをrepositoryへ含めず" in smoke_validation
 
 

@@ -30,11 +30,19 @@ class DoclingConverter:
         backend: DocumentConverterBackend | None = None,
         *,
         do_table_structure: bool = False,
+        artifacts_path: Path | None = None,
     ) -> None:
-        self._backend = backend or self._build_backend(do_table_structure=do_table_structure)
+        self._backend = backend or self._build_backend(
+            do_table_structure=do_table_structure,
+            artifacts_path=artifacts_path,
+        )
 
     @staticmethod
-    def _build_backend(*, do_table_structure: bool = False) -> DocumentConverterBackend:
+    def _build_backend(
+        *,
+        do_table_structure: bool = False,
+        artifacts_path: Path | None = None,
+    ) -> DocumentConverterBackend:
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -44,6 +52,7 @@ class DoclingConverter:
             do_table_structure=do_table_structure,
             force_backend_text=True,
             enable_remote_services=False,
+            artifacts_path=artifacts_path,
         )
         return DocumentConverter(
             format_options={
@@ -56,9 +65,15 @@ class DoclingConverter:
         return result.document.export_to_markdown()
 
 
-def build_docling_converter(do_table_structure: bool = False) -> Converter:
+def build_docling_converter(
+    do_table_structure: bool = False,
+    artifacts_path: Path | None = None,
+) -> Converter:
     """Build the local Docling converter with optional table inference."""
-    return DoclingConverter(do_table_structure=do_table_structure)
+    return DoclingConverter(
+        do_table_structure=do_table_structure,
+        artifacts_path=artifacts_path,
+    )
 
 
 def validate_request(request: ConversionRequest) -> None:
