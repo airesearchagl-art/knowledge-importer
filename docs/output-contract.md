@@ -136,3 +136,59 @@ Artifact ManifestはBatch JSON schema v1、CSV、Quality JSON schema v1、BatchR
 - 同名profileの意味はschema v1内で変更しない。意味を変更する場合は新しいprofile名を追加するか、breaking changeとしてschema versioningを行う
 - optional fieldを追加する場合も、v1 consumerが未知fieldを無視できることと決定性を確認する
 - downstream consumerは`report_type`と`schema_version`を検証してから処理する
+
+## Per-document Metadata Sidecar v1
+
+`--metadata-sidecar`が、成功またはskipしたMarkdownの隣へ生成するdocument単位の契約です。`section/a.md`に対して`section/a.metadata.json`を生成します。Markdown本文へfrontmatterを追加せず、Local RAGなどへの登録処理も含みません。
+
+```json
+{
+  "report_type": "knowledge-document-metadata",
+  "schema_version": 1,
+  "engine": {
+    "name": "knowledge-importer",
+    "version": "0.1.0"
+  },
+  "document": {
+    "input_path": "section/a.pdf",
+    "output_path": "section/a.md",
+    "status": "succeeded"
+  },
+  "artifact": {
+    "bytes": 1234,
+    "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+  },
+  "source": {
+    "bytes": 5678,
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "settings": {
+    "table_structure": false,
+    "normalization_profile": null,
+    "artifacts_path_configured": false
+  }
+}
+```
+
+### Field and status semantics
+
+- `document.input_path` / `output_path`: singleではfilename、batchでは各rootからの相対POSIX path
+- `status`: `succeeded`または`skipped`。failed documentにはsidecarを生成しない
+- `artifact`: 最終Markdown bytesのbyte数とSHA-256
+- `source`: input PDF bytesのbyte数とSHA-256
+- `settings`: artifactへ影響する今回のrequested settingsの最小集合
+- `normalization_profile`: 未指定時`null`、conservative指定時`"conservative"`
+
+skip時は既存Markdownを変更せず、その既存bytesを`artifact`としてhashします。`settings.normalization_profile`は今回要求したsettingであり、skipped outputがそのprofileで生成された履歴保証ではありません。failed itemやpartial/stale outputを新しいsidecar付きartifactとして採用しません。
+
+### Manifestとの共有契約
+
+同じrunでArtifact Manifestとsidecarを指定した場合、input/output path、status、source/artifactのbyte数・SHA-256、engine name/version、`table_structure`、`normalization_profile`、`artifacts_path_configured`が一致します。digestは1 documentにつき一度構築した内部artifact itemから共有します。正規化を完了して最終確定したMarkdown bytesを双方が参照し、Quality warning自体はsidecarへ含めません。
+
+### Determinism, atomic write, and compatibility
+
+同一input bytes、最終Markdown bytes、status、settings、engine versionからはbyte-identicalなUTF-8 JSONを生成します。timestamp、duration、random ID、hostname、username、cwd、command line、absolute path、cache path、temporary pathは含めません。各sidecarは共通atomic JSON writerで同一directoryのtemporary fileから`Path.replace()`し、失敗時は既存sidecarを保護します。
+
+sidecar書き込み失敗はconversion itemのstatusを変更しませんが、CLI最終終了コードを`2`にします。他documentおよびBatch JSON、CSV、Quality JSON、Manifestは可能な限り処理を継続します。sidecar pathはinput PDF、Markdown、各report、他sidecarとcase-insensitive・Unicode NFC比較で競合しないことをconverter開始前に検証します。
+
+Metadata Sidecar schema v1はBatch JSON schema v1、CSV、Quality JSON schema v1、Artifact Manifest schema v1、BatchResultから独立し、既存契約を変更しません。fieldの削除・型や意味の変更にはsidecar schema versionの更新が必要です。

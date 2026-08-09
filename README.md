@@ -90,6 +90,19 @@ backtick/tildeのfenced code block内では、全体の改行コード統一を�
 
 正規化は変換後、品質検査とArtifact Manifest digest計算の前にatomic適用します。`--force`では再変換した出力へ適用します。既存出力をskipした場合はartifact非変更を優先して正規化せず、Manifestの`normalization_profile`はartifact生成履歴ではなく今回要求したglobal settingを表します。したがって、skipされた出力がそのprofileで生成済みであることは保証しません。
 
+### Per-document metadata sidecar
+
+```powershell
+uv run knowledge-importer convert .\input\sample.pdf --output .\output\sample.md --metadata-sidecar
+uv run knowledge-importer convert .\input --output .\output --recursive --metadata-sidecar --manifest-json .\reports\artifacts.json
+```
+
+`--metadata-sidecar`を明示すると、成功またはskipした各Markdownの隣へ`<stem>.metadata.json`を生成します。たとえば`section/a.md`のsidecarは`section/a.metadata.json`です。Markdown本文へfrontmatterを追加せず、Local RAG、vector DB、Obsidianへの登録・同期も行いません。未指定時はsidecar I/Oと追加checksum I/Oを行いません。
+
+sidecar schema version 1はinput/outputの安全な相対POSIX path、status、source PDFと最終Markdownのbyte数・SHA-256、engine、`table_structure`、`normalization_profile`、`artifacts_path_configured`だけを記録します。timestamp、hostname、username、絶対path、command line、cache pathは含めません。正規化指定時は最終正規化済みMarkdownをhashし、Artifact Manifestを同時指定した場合は同じdigest結果を共有します。
+
+batchで既存Markdownをskipした場合もsidecarを生成しますが、Markdown本体は変更しません。このとき`normalization_profile`は今回要求したsettingであり、skipped artifactの生成履歴を保証しません。変換失敗したdocumentにはsidecarを生成せず、他documentの処理を継続します。sidecarはatomic replaceされ、書き込み失敗時は既存sidecarを保護し、変換statusを変えずに最終終了コード`2`を返します。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell
@@ -202,6 +215,8 @@ section/b.PDF,section/b.md,skipped,,既存の出力を保持しました。
 Manifestはinput/outputのbyte数と、file bytesをそのままSHA-256で計算したlowercase digestを記録します。singleではfilename、batchでは各rootからの相対POSIX pathだけを使用します。timestamp、duration、hostname、username、cwd、command line、絶対path、model cache path、`--artifacts-path`の値は含めません。`--artifacts-path`は指定有無だけをbooleanで記録します。
 
 `settings.normalization_profile`は未指定時に`null`、`--normalize-markdown conservative`指定時に`"conservative"`です。正規化指定時のoutput digestは、品質検査と同じ最終正規化済みMarkdown bytesを表します。
+
+per-document sidecarとManifestの共通checksum・path契約は [Knowledge Artifact Output Contract](docs/output-contract.md) を参照してください。
 
 `succeeded`と`skipped`ではinput/output双方のdigestが必須です。`failed`では読み取れるinputだけを記録し、output digestは`null`です。Manifestを指定しない通常実行ではchecksum I/Oを追加しません。Manifest生成または書き込みに失敗した場合、変換statusを変更せず最終終了コードを`2`とし、既存Manifestはatomic writeで保護します。
 

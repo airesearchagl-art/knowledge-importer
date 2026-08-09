@@ -29,6 +29,7 @@ EXPECTED_OPTIONS = (
     "--quality-report-json",
     "--manifest-json",
     "--normalize-markdown",
+    "--metadata-sidecar",
 )
 EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/__init__.py",
@@ -36,6 +37,7 @@ EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/artifact_manifest.py",
     "knowledge_importer/cli.py",
     "knowledge_importer/converter.py",
+    "knowledge_importer/document_metadata.py",
     "knowledge_importer/json_writer.py",
     "knowledge_importer/logging_config.py",
     "knowledge_importer/main.py",
