@@ -15,6 +15,7 @@ from pathlib import Path
 
 from knowledge_importer.artifact_manifest import (
     ArtifactManifest,
+    ArtifactManifestItem,
     ArtifactManifestSettings,
     ManifestStatus,
     build_manifest_item,
@@ -25,6 +26,12 @@ from knowledge_importer.converter import (
     build_docling_converter,
     convert_file,
     validate_request,
+)
+from knowledge_importer.document_metadata import (
+    DocumentMetadataSettings,
+    build_document_metadata,
+    metadata_sidecar_path,
+    write_document_metadata,
 )
 from knowledge_importer.json_writer import write_json_atomically
 from knowledge_importer.markdown_normalization import (
@@ -200,6 +207,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PROFILE",
         help="生成Markdownへopt-in正規化profileを適用（conservative）",
     )
+    convert_parser.add_argument(
+        "--metadata-sidecar",
+        action="store_true",
+        help="成功・スキップしたMarkdownの隣へmetadata JSONを生成",
+    )
     return parser
 
 
@@ -210,6 +222,25 @@ def _path_comparison_key(path: Path) -> str:
 
 def _paths_are_equal(first: Path, second: Path) -> bool:
     return _path_comparison_key(first) == _path_comparison_key(second)
+
+
+def _metadata_sidecars_conflict(
+    requests: Sequence[ConversionRequest],
+    report_paths: Sequence[Path | None],
+) -> bool:
+    reserved = {
+        _path_comparison_key(path)
+        for request in requests
+        for path in (request.input_path, request.output_path)
+    }
+    reserved.update(_path_comparison_key(path) for path in report_paths if path is not None)
+    sidecars: set[str] = set()
+    for request in requests:
+        key = _path_comparison_key(metadata_sidecar_path(request.output_path))
+        if key in reserved or key in sidecars:
+            return True
+        sidecars.add(key)
+    return False
 
 
 def run(
@@ -276,6 +307,7 @@ def run(
             quality_report_json=args.quality_report_json,
             manifest_json=args.manifest_json,
             normalization_profile=args.normalize_markdown,
+            metadata_sidecar=args.metadata_sidecar,
             artifacts_path=args.artifacts_path,
             converter_factory=converter_factory,
         )
@@ -314,6 +346,23 @@ def run(
         )
         return 2
 
+    if args.metadata_sidecar:
+        sidecar_path = metadata_sidecar_path(args.output)
+        conflict_paths = (
+            args.input,
+            args.output,
+            args.quality_report_json,
+            args.manifest_json,
+        )
+        if any(
+            path is not None and _paths_are_equal(sidecar_path, path) for path in conflict_paths
+        ):
+            print(
+                "エラー: Metadata sidecarの出力先が入力または他の出力先と競合します",
+                file=sys.stderr,
+            )
+            return 2
+
     request = ConversionRequest(
         input_path=args.input,
         output_path=args.output,
@@ -327,6 +376,7 @@ def run(
         quality_report_json=args.quality_report_json,
         manifest_json=args.manifest_json,
         normalization_profile=args.normalize_markdown,
+        metadata_sidecar=args.metadata_sidecar,
         artifacts_path=args.artifacts_path,
     )
 
@@ -369,7 +419,10 @@ def _single_artifact_manifest(
     status: ManifestStatus,
     settings: ArtifactManifestSettings,
     failure: BatchFailure | None = None,
+    item: ArtifactManifestItem | None = None,
 ) -> ArtifactManifest:
+    if item is not None:
+        return ArtifactManifest(settings=settings, items=(item,))
     return ArtifactManifest(
         settings=settings,
         items=(
@@ -402,6 +455,33 @@ def _write_artifact_manifest_safely(
     return True
 
 
+def _document_metadata_settings(
+    settings: ArtifactManifestSettings,
+) -> DocumentMetadataSettings:
+    return DocumentMetadataSettings(
+        table_structure=settings.table_structure,
+        normalization_profile=settings.normalization_profile,
+        artifacts_path_configured=settings.artifacts_path_configured,
+    )
+
+
+def _write_document_metadata_safely(
+    sidecar_path: Path,
+    item: ArtifactManifestItem,
+    settings: ArtifactManifestSettings,
+) -> bool:
+    try:
+        write_document_metadata(
+            sidecar_path,
+            build_document_metadata(item, _document_metadata_settings(settings)),
+        )
+    except Exception as exc:  # noqa: BLE001 - sidecar failures map to exit code 2.
+        LOGGER.error("metadata_sidecar_write_failed exception_type=%s", type(exc).__name__)
+        print("Metadata sidecarを書き込めませんでした。", file=sys.stderr)
+        return False
+    return True
+
+
 def _convert_request(
     request: ConversionRequest,
     converter: Converter | None = None,
@@ -414,6 +494,7 @@ def _convert_request(
     quality_report_json: Path | None = None,
     manifest_json: Path | None = None,
     normalization_profile: str | None = None,
+    metadata_sidecar: bool = False,
 ) -> int:
     LOGGER.info(
         "conversion_start input=%s output=%s",
@@ -533,7 +614,35 @@ def _convert_request(
             )
         )
         report_failed = not _write_quality_report_safely(quality_report_json, report)
-    if manifest_json is not None:
+
+    artifact_item: ArtifactManifestItem | None = None
+    if metadata_sidecar or manifest_json is not None:
+        try:
+            artifact_item = build_manifest_item(
+                input_path=request.input_path,
+                output_path=request.output_path,
+                input_name=request.input_path.name,
+                output_name=request.output_path.name,
+                status=ManifestStatus.SUCCEEDED,
+            )
+        except Exception as exc:  # noqa: BLE001 - checksum failures map to exit code 2.
+            LOGGER.error("artifact_digest_failed exception_type=%s", type(exc).__name__)
+            if metadata_sidecar:
+                print("Metadata sidecarを書き込めませんでした。", file=sys.stderr)
+            if manifest_json is not None:
+                print("Artifact Manifestを書き込めませんでした。", file=sys.stderr)
+            report_failed = True
+
+    if metadata_sidecar and artifact_item is not None:
+        report_failed = (
+            not _write_document_metadata_safely(
+                metadata_sidecar_path(request.output_path),
+                artifact_item,
+                settings,
+            )
+            or report_failed
+        )
+    if manifest_json is not None and artifact_item is not None:
         report_failed = (
             not _write_artifact_manifest_safely(
                 manifest_json,
@@ -541,6 +650,7 @@ def _convert_request(
                     request,
                     status=ManifestStatus.SUCCEEDED,
                     settings=settings,
+                    item=artifact_item,
                 ),
             )
             or report_failed
@@ -952,7 +1062,10 @@ def _batch_artifact_manifest(
     requests: Sequence[ConversionRequest],
     *,
     settings: ArtifactManifestSettings,
+    prepared_items: tuple[ArtifactManifestItem, ...] | None = None,
 ) -> ArtifactManifest:
+    if prepared_items is not None:
+        return ArtifactManifest(settings=settings, items=prepared_items)
     status_map = {
         BatchItemStatus.SUCCEEDED: ManifestStatus.SUCCEEDED,
         BatchItemStatus.SKIPPED: ManifestStatus.SKIPPED,
@@ -975,6 +1088,75 @@ def _batch_artifact_manifest(
     return ArtifactManifest(settings=settings, items=items)
 
 
+def _prepare_batch_artifacts(
+    result: BatchResult,
+    requests: Sequence[ConversionRequest],
+    *,
+    settings: ArtifactManifestSettings,
+    metadata_sidecar: bool,
+    manifest_requested: bool,
+) -> tuple[ArtifactManifest | None, bool]:
+    status_map = {
+        BatchItemStatus.SUCCEEDED: ManifestStatus.SUCCEEDED,
+        BatchItemStatus.SKIPPED: ManifestStatus.SKIPPED,
+        BatchItemStatus.FAILED: ManifestStatus.FAILED,
+    }
+    manifest_items: list[ArtifactManifestItem] = []
+    manifest_complete = True
+    report_failed = False
+
+    for request, result_item in zip(requests, result.items, strict=True):
+        if result_item.status is BatchItemStatus.FAILED and not manifest_requested:
+            continue
+        try:
+            item = build_manifest_item(
+                input_path=request.input_path,
+                output_path=request.output_path,
+                input_name=result_item.input_name,
+                output_name=result_item.output_name,
+                status=status_map[result_item.status],
+                error_category=(
+                    result_item.error_category.value
+                    if result_item.error_category is not None
+                    else None
+                ),
+                message=result_item.message,
+            )
+        except Exception as exc:  # noqa: BLE001 - checksum failures map to exit code 2.
+            LOGGER.error("artifact_digest_failed exception_type=%s", type(exc).__name__)
+            if metadata_sidecar and result_item.status is not BatchItemStatus.FAILED:
+                print("Metadata sidecarを書き込めませんでした。", file=sys.stderr)
+            manifest_complete = False
+            report_failed = True
+            continue
+
+        if manifest_requested:
+            manifest_items.append(item)
+        if (
+            metadata_sidecar
+            and result_item.status is not BatchItemStatus.FAILED
+            and not _write_document_metadata_safely(
+                metadata_sidecar_path(request.output_path),
+                item,
+                settings,
+            )
+        ):
+            report_failed = True
+
+    manifest: ArtifactManifest | None = None
+    if manifest_requested:
+        if manifest_complete and len(manifest_items) == len(result.items):
+            manifest = _batch_artifact_manifest(
+                result,
+                requests,
+                settings=settings,
+                prepared_items=tuple(manifest_items),
+            )
+        else:
+            print("Artifact Manifestを書き込めませんでした。", file=sys.stderr)
+    return manifest, report_failed
+
+
 def _write_requested_reports(
     result: BatchResult,
     *,
@@ -984,8 +1166,9 @@ def _write_requested_reports(
     quality_report: QualityReport | None = None,
     manifest_json: Path | None = None,
     manifest_factory: Callable[[], ArtifactManifest] | None = None,
+    initial_report_failed: bool = False,
 ) -> bool:
-    report_failed = False
+    report_failed = initial_report_failed
     if quality_report_json is not None and not _write_quality_report_safely(
         quality_report_json,
         quality_report if quality_report is not None else QualityReport(()),
@@ -1002,11 +1185,11 @@ def _write_requested_reports(
                 type(exc).__name__,
             )
             print("CSVレポートを書き込めませんでした。", file=sys.stderr)
-    if manifest_json is not None:
-        if manifest_factory is None:
-            raise RuntimeError("Artifact Manifest factoryが必要です")
-        if not _write_artifact_manifest_safely(manifest_json, manifest_factory):
-            report_failed = True
+    if manifest_json is not None and (
+        manifest_factory is None
+        or not _write_artifact_manifest_safely(manifest_json, manifest_factory)
+    ):
+        report_failed = True
     if report_json is not None:
         try:
             _write_batch_report(
@@ -1027,14 +1210,26 @@ def _write_requested_reports(
 
 def _finish_batch(
     result: BatchResult,
+    requests: Sequence[ConversionRequest],
+    settings: ArtifactManifestSettings,
     report_json: Path | None,
     report_csv: Path | None,
     quality_report_json: Path | None,
     quality_report: QualityReport,
     manifest_json: Path | None,
-    manifest_factory: Callable[[], ArtifactManifest] | None,
+    metadata_sidecar: bool,
 ) -> int:
     print(_format_batch_summary(result))
+    prepared_manifest: ArtifactManifest | None = None
+    artifact_failed = False
+    if metadata_sidecar or manifest_json is not None:
+        prepared_manifest, artifact_failed = _prepare_batch_artifacts(
+            result,
+            requests,
+            settings=settings,
+            metadata_sidecar=metadata_sidecar,
+            manifest_requested=manifest_json is not None,
+        )
     report_failed = _write_requested_reports(
         result,
         report_json=report_json,
@@ -1042,9 +1237,10 @@ def _finish_batch(
         quality_report_json=quality_report_json,
         quality_report=quality_report,
         manifest_json=manifest_json,
-        manifest_factory=manifest_factory,
+        manifest_factory=((lambda: prepared_manifest) if prepared_manifest is not None else None),
+        initial_report_failed=artifact_failed,
     )
-    return 2 if report_failed else result.exit_code
+    return 2 if report_failed or artifact_failed else result.exit_code
 
 
 def _batch_result_item(
@@ -1127,6 +1323,7 @@ def _run_directory(
     quality_report_json: Path | None,
     manifest_json: Path | None,
     normalization_profile: str | None,
+    metadata_sidecar: bool,
     artifacts_path: Path | None,
     converter_factory: Callable[..., Converter],
 ) -> int:
@@ -1197,6 +1394,16 @@ def _run_directory(
         )
         return 2
 
+    if metadata_sidecar and _metadata_sidecars_conflict(
+        requests,
+        (report_json, report_csv, quality_report_json, manifest_json),
+    ):
+        print(
+            "エラー: Metadata sidecarの出力先が入力または他の出力先と競合します",
+            file=sys.stderr,
+        )
+        return 2
+
     pending_requests: list[ConversionRequest] = []
     skipped_requests: list[ConversionRequest] = []
     result_items: dict[Path, BatchResultItem] = {}
@@ -1261,16 +1468,14 @@ def _run_directory(
             result = BatchResult(tuple(result_items[request.input_path] for request in requests))
             return _finish_batch(
                 result,
+                requests,
+                manifest_settings,
                 report_json,
                 report_csv,
                 quality_report_json,
                 QualityReport(()),
                 manifest_json,
-                lambda: _batch_artifact_manifest(
-                    result,
-                    requests,
-                    settings=manifest_settings,
-                ),
+                metadata_sidecar,
             )
     else:
         converter = None
@@ -1330,14 +1535,12 @@ def _run_directory(
     result = BatchResult(tuple(result_items[request.input_path] for request in requests))
     return _finish_batch(
         result,
+        requests,
+        manifest_settings,
         report_json,
         report_csv,
         quality_report_json,
         QualityReport(tuple(quality_items)),
         manifest_json,
-        lambda: _batch_artifact_manifest(
-            result,
-            requests,
-            settings=manifest_settings,
-        ),
+        metadata_sidecar,
     )
