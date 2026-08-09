@@ -103,6 +103,26 @@ sidecar schema version 1はinput/outputの安全な相対POSIX path、status、s
 
 batchで既存Markdownをskipした場合もsidecarを生成しますが、Markdown本体は変更しません。このとき`normalization_profile`は今回要求したsettingであり、skipped artifactの生成履歴を保証しません。変換失敗したdocumentにはsidecarを生成せず、他documentの処理を継続します。sidecarはatomic replaceされ、書き込み失敗時は既存sidecarを保護し、変換statusを変えずに最終終了コード`2`を返します。
 
+### Knowledge Package validation
+
+```powershell
+# sidecarとMarkdownだけを検証
+uv run knowledge-importer validate .\output
+
+# Artifact Manifestとの整合も検証
+uv run knowledge-importer validate .\output --manifest .\reports\artifacts.json
+
+# extra Markdownもfailureにし、決定的なJSON reportを生成
+uv run knowledge-importer validate .\output --manifest .\reports\artifacts.json `
+  --strict --report-json .\reports\validation.json
+```
+
+`validate PACKAGE_ROOT`は既存Markdown、`.metadata.json`、任意のArtifact Manifest v1をread-only検証します。PDF変換、Docling、normalization、repair、sidecar生成・削除、Local RAGやvector DBへの登録は実行しません。`--report-json`を指定した場合だけ、独立したKnowledge Package Validation schema version 1をatomic出力します。
+
+Manifestなしでは各sidecarのschemaと対応Markdownのsize・SHA-256を検証し、source PDFの存在は要求しません。Manifest指定時はmissing/stale/orphan sidecar、path・status・digest・engine・settingsの不一致も検出します。Manifestにないsidecarは常にerror、Manifestにないextra Markdownはdefaultでwarning、`--strict`ではerrorです。unknown fieldはforward compatibilityのため許容し、必須field・型・semanticだけを検証します。
+
+終了コードは成功`0`、integrity failure`1`、package root・Manifest・validation report書き込みなどのCLI/I/O error`2`です。issueにはpackage root相対POSIX pathだけを使用し、絶対path、username、traceback、timestamp、hostname、command lineは出力しません。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell
