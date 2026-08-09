@@ -123,6 +123,23 @@ Manifestなしでは各sidecarのschemaと対応Markdownのsize・SHA-256を検�
 
 終了コードは成功`0`、integrity failure`1`、package root・Manifest・validation report書き込みなどのCLI/I/O error`2`です。issueにはpackage root相対POSIX pathだけを使用し、絶対path、username、traceback、timestamp、hostname、command lineは出力しません。
 
+### Knowledge Package repair plan / dry-run
+
+```powershell
+# validation結果から修復候補を表示（packageは変更しない）
+uv run knowledge-importer repair-plan .\output --manifest .\reports\artifacts.json
+
+# strict validationを使い、決定的なRepair Plan JSONをatomic出力
+uv run knowledge-importer repair-plan .\output --manifest .\reports\artifacts.json `
+  --strict --report-json .\reports\repair-plan.json
+```
+
+`repair-plan PACKAGE_ROOT`は既存のKnowledge Package validationを1回だけ実行し、issueをRepair Plan schema version 1のactionへ変換するdry-runです。Markdown、Metadata Sidecar、Artifact Manifest、PDF、既存のBatch・CSV・Quality reportを生成・削除・修正せず、`--report-json`指定時だけ独立したRepair Plan JSONを書き込みます。実修復、変換、normalization、Local RAG・vector DB登録は行いません。
+
+`safe=true`は、validなManifestによって意味が一意に確定した`missing-sidecar`の`regenerate-sidecar`と、failed itemに残る`stale-sidecar`の`remove-stale-sidecar`だけに付与します。ただし、このコマンド自体はsafe actionも実行しません。digest・size・path・settingsなど正しい側を一意に決められない不整合は`manual-review`、strict時のextra Markdownはunsafeな`regenerate-manifest`候補です。defaultのwarningは問題数に含めますがaction化しません。
+
+Manifestなしではsidecar単体validationだけを計画へ利用し、安全なmissing/stale判定を推測しません。invalidなManifestに関連する候補も`manual-review`へ落とします。既存の`--report-json`出力はRepair Plan schema version 1自身だけatomic更新でき、Batch JSON、Quality JSON、Artifact Manifest、Metadata Sidecar、Markdown、CSVなど他の既存fileはvalidation実行前に拒否します。計画生成成功はissueの有無にかかわらず終了コード`0`、package root・Manifest・report出力などのCLI/I/O errorは`2`です。出力は相対POSIX pathのみで、同一package・optionから同一action順・同一JSON bytesを生成します。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell
