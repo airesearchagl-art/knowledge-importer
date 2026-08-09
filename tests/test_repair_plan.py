@@ -235,13 +235,101 @@ def test_cli_rejects_invalid_inputs_and_report_conflicts(tmp_path: Path) -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    [
+        (
+            "batch.json",
+            {"report_type": "knowledge-importer-batch", "schema_version": 1, "items": []},
+        ),
+        (
+            "quality.json",
+            {"report_type": "markdown-quality", "schema_version": 1, "items": []},
+        ),
+        (
+            "manifest.json",
+            {"report_type": "knowledge-artifact-manifest", "schema_version": 1, "items": []},
+        ),
+        (
+            "document.metadata.json",
+            {"report_type": "knowledge-document-metadata", "schema_version": 1},
+        ),
+        (
+            "incomplete-repair.json",
+            {
+                "report_type": "knowledge-package-repair-plan",
+                "schema_version": 1,
+                "summary": {},
+                "actions": [],
+            },
+        ),
+        ("document.md", "# 既存Markdown\n"),
+        ("batch.csv", "input,output,status,error_category,message\n"),
+    ],
+)
+def test_existing_knowledge_package_files_cannot_be_overwritten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+    payload: object,
+) -> None:
+    existing = tmp_path / name
+    if isinstance(payload, dict):
+        existing.write_text(
+            json.dumps(payload, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    else:
+        existing.write_text(payload, encoding="utf-8")
+    before = existing.read_bytes()
+
+    def unexpected_validation(*args: object, **kwargs: object) -> PackageValidationResult:
+        raise AssertionError("validation must not run for a conflicting report path")
+
+    monkeypatch.setattr(cli, "validate_package", unexpected_validation)
+
+    assert cli.run(["repair-plan", str(tmp_path), "--report-json", str(existing)]) == 2
+
+    captured = capsys.readouterr()
+    assert existing.read_bytes() == before
+    assert captured.err in {
+        "エラー: Repair Planの出力先が検証対象と競合します\n",
+        "エラー: 既存のRepair Plan以外は上書きできません\n",
+    }
+    assert str(tmp_path) not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_existing_repair_plan_can_be_atomically_updated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = tmp_path / "repair-plan.json"
+    write_repair_plan(report, build_repair_plan(_result(_issue("missing-artifact"))))
+
+    monkeypatch.setattr(
+        cli,
+        "validate_package",
+        lambda *args, **kwargs: PackageValidationResult((), ()),
+    )
+
+    assert cli.run(["repair-plan", str(tmp_path), "--report-json", str(report)]) == 0
+    assert json.loads(report.read_text(encoding="utf-8"))["summary"] == {
+        "issues": 0,
+        "actions": 0,
+        "manual_review": 0,
+    }
+
+
 def test_report_failure_preserves_existing_and_hides_sensitive_details(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     report = tmp_path / "repair.json"
-    report.write_text("existing\n", encoding="utf-8")
+    write_repair_plan(report, build_repair_plan(_result(_issue("missing-artifact"))))
+    existing = report.read_bytes()
 
     def failing_writer(path: Path, plan: object) -> None:
         raise OSError(f"cannot write {tmp_path} Traceback")
@@ -251,7 +339,7 @@ def test_report_failure_preserves_existing_and_hides_sensitive_details(
     assert cli.run(["repair-plan", str(tmp_path), "--report-json", str(report)]) == 2
 
     captured = capsys.readouterr()
-    assert report.read_text(encoding="utf-8") == "existing\n"
+    assert report.read_bytes() == existing
     assert captured.err == "Repair Planを書き込めませんでした。\n"
     assert str(tmp_path) not in captured.err
     assert "Traceback" not in captured.err

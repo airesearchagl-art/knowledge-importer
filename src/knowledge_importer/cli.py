@@ -58,7 +58,11 @@ from knowledge_importer.quality_report import (
     QualityReportItem,
     write_quality_report,
 )
-from knowledge_importer.repair_plan import build_repair_plan, write_repair_plan
+from knowledge_importer.repair_plan import (
+    build_repair_plan,
+    is_repair_plan_report,
+    write_repair_plan,
+)
 
 LOGGER = logging.getLogger("knowledge_importer")
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\)[^\s]+")
@@ -359,6 +363,13 @@ def _run_repair_plan(
         or (manifest_path is not None and _paths_are_equal(report_json, manifest_path))
     ):
         print("エラー: Repair Planの出力先が検証対象と競合します", file=sys.stderr)
+        return 2
+    if (
+        report_json is not None
+        and (report_json.is_symlink() or report_json.exists())
+        and not is_repair_plan_report(report_json)
+    ):
+        print("エラー: 既存のRepair Plan以外は上書きできません", file=sys.stderr)
         return 2
 
     validation_result = validate_package(

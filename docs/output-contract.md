@@ -291,4 +291,4 @@ default validationのwarningは`summary.issues`に含めますがactionを生成
 
 actionはNFC・case-insensitiveなpath、action、reason categoryの順で固定sortingします。JSONはUTF-8、2-space indent、末尾改行付きで、timestamp、hostname、username、絶対path、cwd、command line、cache path、random IDを含めません。同一packageとvalidation modeから同一JSON bytesを生成します。
 
-Markdown、Metadata Sidecar、Artifact Manifest、PDF、Batch JSON、CSV、Quality JSONは一切変更しません。`--report-json`だけが共通atomic writerによる書込み境界です。終了コードはplan生成成功（issueの有無を問わない）が`0`、CLI input・Manifest指定・report書込みerrorが`2`です。repair execution、sidecar生成・削除、Manifest・digest更新、変換、normalization、Local RAG登録は別フェーズです。
+Markdown、Metadata Sidecar、Artifact Manifest、PDF、Batch JSON、CSV、Quality JSONは一切変更しません。`--report-json`だけが共通atomic writerによる書込み境界です。既存fileへの出力は`report_type=knowledge-package-repair-plan`、`schema_version=1`および必須container型を満たすRepair Plan自身だけ許可し、その他はvalidation・planning前に拒否します。終了コードはplan生成成功（issueの有無を問わない）が`0`、CLI input・Manifest指定・report書込みerrorが`2`です。repair execution、sidecar生成・削除、Manifest・digest更新、変換、normalization、Local RAG登録は別フェーズです。

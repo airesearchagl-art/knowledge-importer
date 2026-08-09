@@ -138,7 +138,7 @@ uv run knowledge-importer repair-plan .\output --manifest .\reports\artifacts.js
 
 `safe=true`は、validなManifestによって意味が一意に確定した`missing-sidecar`の`regenerate-sidecar`と、failed itemに残る`stale-sidecar`の`remove-stale-sidecar`だけに付与します。ただし、このコマンド自体はsafe actionも実行しません。digest・size・path・settingsなど正しい側を一意に決められない不整合は`manual-review`、strict時のextra Markdownはunsafeな`regenerate-manifest`候補です。defaultのwarningは問題数に含めますがaction化しません。
 
-Manifestなしではsidecar単体validationだけを計画へ利用し、安全なmissing/stale判定を推測しません。invalidなManifestに関連する候補も`manual-review`へ落とします。計画生成成功はissueの有無にかかわらず終了コード`0`、package root・Manifest・report出力などのCLI/I/O errorは`2`です。出力は相対POSIX pathのみで、同一package・optionから同一action順・同一JSON bytesを生成します。
+Manifestなしではsidecar単体validationだけを計画へ利用し、安全なmissing/stale判定を推測しません。invalidなManifestに関連する候補も`manual-review`へ落とします。既存の`--report-json`出力はRepair Plan schema version 1自身だけatomic更新でき、Batch JSON、Quality JSON、Artifact Manifest、Metadata Sidecar、Markdown、CSVなど他の既存fileはvalidation実行前に拒否します。計画生成成功はissueの有無にかかわらず終了コード`0`、package root・Manifest・report出力などのCLI/I/O errorは`2`です。出力は相対POSIX pathのみで、同一package・optionから同一action順・同一JSON bytesを生成します。
 
 ### Recursive conversion / include・exclude filters
 
