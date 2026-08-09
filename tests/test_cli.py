@@ -91,6 +91,7 @@ def test_convert_help_describes_directory_options(capsys: object) -> None:
     assert "--quality-warnings" in help_text
     assert "--quality-report-json" in help_text
     assert "--manifest-json" in help_text
+    assert "--normalize-markdown PROFILE" in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:

@@ -27,6 +27,10 @@ from knowledge_importer.converter import (
     validate_request,
 )
 from knowledge_importer.json_writer import write_json_atomically
+from knowledge_importer.markdown_normalization import (
+    SUPPORTED_NORMALIZATION_PROFILES,
+    normalize_markdown_file,
+)
 from knowledge_importer.markdown_quality import (
     RuntimeQualityWarning,
     evaluate_runtime_quality_warnings,
@@ -191,6 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="変換artifactの決定的なManifest JSONを出力",
     )
+    convert_parser.add_argument(
+        "--normalize-markdown",
+        metavar="PROFILE",
+        help="生成Markdownへopt-in正規化profileを適用（conservative）",
+    )
     return parser
 
 
@@ -209,6 +218,15 @@ def run(
     converter_factory: Callable[..., Converter] = build_docling_converter,
 ) -> int:
     args = build_parser().parse_args(argv)
+    if (
+        args.normalize_markdown is not None
+        and args.normalize_markdown not in SUPPORTED_NORMALIZATION_PROFILES
+    ):
+        print(
+            "エラー: --normalize-markdownにはconservativeを指定してください",
+            file=sys.stderr,
+        )
+        return 2
     if args.artifacts_path is not None and not args.artifacts_path.is_dir():
         print(
             "エラー: --artifacts-pathには存在するローカルディレクトリを指定してください",
@@ -257,6 +275,7 @@ def run(
             quality_warnings=args.quality_warnings,
             quality_report_json=args.quality_report_json,
             manifest_json=args.manifest_json,
+            normalization_profile=args.normalize_markdown,
             artifacts_path=args.artifacts_path,
             converter_factory=converter_factory,
         )
@@ -307,6 +326,7 @@ def run(
         quality_warnings=args.quality_warnings,
         quality_report_json=args.quality_report_json,
         manifest_json=args.manifest_json,
+        normalization_profile=args.normalize_markdown,
         artifacts_path=args.artifacts_path,
     )
 
@@ -330,6 +350,7 @@ def _manifest_settings(
     force: bool,
     do_table_structure: bool,
     artifacts_path: Path | None,
+    normalization_profile: str | None,
 ) -> ArtifactManifestSettings:
     return ArtifactManifestSettings(
         recursive=recursive,
@@ -338,7 +359,7 @@ def _manifest_settings(
         force=force,
         table_structure=do_table_structure,
         artifacts_path_configured=artifacts_path is not None,
-        normalization_profile=None,
+        normalization_profile=normalization_profile,
     )
 
 
@@ -392,6 +413,7 @@ def _convert_request(
     quality_warnings: bool = False,
     quality_report_json: Path | None = None,
     manifest_json: Path | None = None,
+    normalization_profile: str | None = None,
 ) -> int:
     LOGGER.info(
         "conversion_start input=%s output=%s",
@@ -406,6 +428,7 @@ def _convert_request(
         force=request.force,
         do_table_structure=do_table_structure,
         artifacts_path=artifacts_path,
+        normalization_profile=normalization_profile,
     )
     validation_succeeded = False
     try:
@@ -420,6 +443,8 @@ def _convert_request(
                 artifacts_path=artifacts_path,
             )
         convert_file(request, converter)
+        if normalization_profile is not None:
+            normalize_markdown_file(request.output_path, normalization_profile)
     except KnowledgeImporterError as exc:
         LOGGER.error(
             "conversion_end success=false input=%s output=%s exception_type=%s",
@@ -1048,6 +1073,7 @@ def _convert_batch_request(
     output_name: str,
     quality_warnings: bool,
     quality_report_enabled: bool,
+    normalization_profile: str | None,
 ) -> tuple[BatchFailure | None, tuple[RuntimeQualityWarning, ...]]:
     LOGGER.info(
         "conversion_start input=%s output=%s",
@@ -1056,6 +1082,8 @@ def _convert_batch_request(
     )
     try:
         convert_file(request, _BatchConverterAdapter(converter))
+        if normalization_profile is not None:
+            normalize_markdown_file(request.output_path, normalization_profile)
     except Exception as exc:  # noqa: BLE001 - batch boundary classifies every file failure.
         failure = _classify_batch_failure(exc, request)
         failure = BatchFailure(input_name, failure.category, failure.reason)
@@ -1098,6 +1126,7 @@ def _run_directory(
     quality_warnings: bool,
     quality_report_json: Path | None,
     manifest_json: Path | None,
+    normalization_profile: str | None,
     artifacts_path: Path | None,
     converter_factory: Callable[..., Converter],
 ) -> int:
@@ -1108,6 +1137,7 @@ def _run_directory(
         force=force,
         do_table_structure=do_table_structure,
         artifacts_path=artifacts_path,
+        normalization_profile=normalization_profile,
     )
     try:
         requests = _build_batch_requests(
@@ -1258,6 +1288,7 @@ def _run_directory(
             output_name=output_name,
             quality_warnings=quality_warnings,
             quality_report_enabled=quality_report_json is not None,
+            normalization_profile=normalization_profile,
         )
         if failure is None:
             success_count += 1

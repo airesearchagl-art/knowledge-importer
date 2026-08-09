@@ -66,9 +66,11 @@
 - `force`: 既存Markdownの再生成を許可したか
 - `table_structure`: Docling TableFormerを有効化したか
 - `artifacts_path_configured`: local artifacts pathを指定したか。path値そのものは記録しない
-- `normalization_profile`: v1予約field。現在は常に`null`
+- `normalization_profile`: 今回要求したMarkdown正規化profile。未指定時は`null`、conservative指定時は`"conservative"`
 
 同一CLI設定を同一順序で指定した場合に同じJSONを生成します。globの順序が異なる実行は、現在のfilter結果が同じでも別の設定表現として扱います。
+
+`normalization_profile`はglobal requested settingであり、各artifactの生成履歴を証明するfieldではありません。既存Markdownが`--force`なしでskipされた場合はartifact非変更を優先して正規化を適用しないため、設定値が`"conservative"`でも、そのskipped outputが同profileで生成済みとは限りません。生成履歴をper-itemで証明する契約はschema v1の対象外です。
 
 ## Item status
 
@@ -89,6 +91,8 @@ failed変換が不完全なMarkdownを残した場合も、そのoutputをartifa
 - `bytes`: hash対象fileのbyte数
 
 Manifest未指定時はchecksumを計算せず、既存のperformanceとI/O挙動を維持します。
+
+正規化を指定したsucceeded itemでは、Docling出力を書き込んだ後に正規化をatomic適用し、その最終Markdown bytesをhashします。Quality WarningおよびQuality JSONも同じ最終bytesを評価します。
 
 ## Path semantics
 
@@ -129,5 +133,6 @@ Artifact ManifestはBatch JSON schema v1、CSV、Quality JSON schema v1、BatchR
 
 - field削除、型変更、statusやfieldの意味変更などのbreaking changeでは`schema_version`を上げる
 - schema v1の既存fieldへ別の意味を後付けしない
+- 同名profileの意味はschema v1内で変更しない。意味を変更する場合は新しいprofile名を追加するか、breaking changeとしてschema versioningを行う
 - optional fieldを追加する場合も、v1 consumerが未知fieldを無視できることと決定性を確認する
 - downstream consumerは`report_type`と`schema_version`を検証してから処理する
