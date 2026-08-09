@@ -192,3 +192,59 @@ skip時は既存Markdownを変更せず、その既存bytesを`artifact`とし�
 sidecar書き込み失敗はconversion itemのstatusを変更しませんが、CLI最終終了コードを`2`にします。他documentおよびBatch JSON、CSV、Quality JSON、Manifestは可能な限り処理を継続します。sidecar pathはinput PDF、Markdown、各report、他sidecarとcase-insensitive・Unicode NFC比較で競合しないことをconverter開始前に検証します。
 
 Metadata Sidecar schema v1はBatch JSON schema v1、CSV、Quality JSON schema v1、Artifact Manifest schema v1、BatchResultから独立し、既存契約を変更しません。fieldの削除・型や意味の変更にはsidecar schema versionの更新が必要です。
+
+## Knowledge Package Validation v1
+
+`knowledge-importer validate PACKAGE_ROOT`は、既存packageを変更せずMetadata Sidecar v1とMarkdownを検証します。`--manifest PATH`指定時はArtifact Manifest v1との整合も検証します。Batch JSONとQuality JSONはvalidation v1の対象外です。
+
+```json
+{
+  "report_type": "knowledge-package-validation",
+  "schema_version": 1,
+  "summary": {
+    "checked": 4,
+    "passed": 3,
+    "failed": 1,
+    "warnings": 0
+  },
+  "issues": [
+    {
+      "path": "section/a.metadata.json",
+      "severity": "error",
+      "category": "artifact-digest-mismatch",
+      "message": "Markdown digestがsidecarと一致しません"
+    }
+  ]
+}
+```
+
+### Issue contract
+
+| Category | Meaning |
+|---|---|
+| `invalid-json` | sidecarまたはManifestをJSONとして読めない |
+| `invalid-schema` | 必須field、型、値、digest形式が不正 |
+| `unsupported-schema` | `schema_version`が1ではない |
+| `missing-artifact` | sidecar対応Markdownが存在しない |
+| `missing-sidecar` | succeeded/skipped Manifest itemのsidecarがない |
+| `stale-sidecar` | failed Manifest itemにsidecarが存在する |
+| `orphan-sidecar` | Manifestに対応itemがないsidecar |
+| `artifact-size-mismatch` | Markdown sizeがsidecarと一致しない |
+| `artifact-digest-mismatch` | Markdown SHA-256がsidecarと一致しない |
+| `manifest-sidecar-mismatch` | status、engine、source/output digestが一致しない |
+| `path-mismatch` | sidecar filenameまたはManifestとのpathが一致しない |
+| `settings-mismatch` | Manifestとsidecarの設定が一致しない |
+| `outside-package-root` | pathまたはsymlinkがpackage root外へ解決される |
+| `extra-artifact` | Manifestに含まれないMarkdown |
+
+`orphan-sidecar`は常にerrorです。`extra-artifact`だけはdefaultでwarning、`--strict`でerrorになります。Manifest未指定時はorphan/extra判定を行わず、sidecar単体契約としてMarkdownの存在・size・digestを確認します。source PDFはpackage外にある場合を許容し、Manifestなしではsource digestのschema妥当性だけを確認します。
+
+### Exit codes and deterministic output
+
+- `0`: errorなし。warningのみを含む場合も成功
+- `1`: integrity validation errorが1件以上
+- `2`: CLI input、Manifest指定、validation report書き込みなどのI/O error
+
+issueは相対path、category、severity、messageの固定順でsortingします。同じpackageとoptionからはstdout summaryとreport JSON bytesが同一です。validation reportはUTF-8、2-space indent、末尾改行付きで共通atomic JSON writerから出力します。absolute path、timestamp、hostname、username、cwd、command lineを含めません。
+
+unknown fieldはforward compatibilityのため許容します。required fieldの削除、型・semantic・severity/category contractのbreaking changeにはvalidation reportのschema version更新が必要です。validationはMarkdown、sidecar、Manifest、PDFを修復・再生成・削除しません。

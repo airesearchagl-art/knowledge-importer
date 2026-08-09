@@ -72,6 +72,7 @@ def test_help_describes_convert_command() -> None:
     help_text = build_parser().format_help()
 
     assert "convert" in help_text
+    assert "validate" in help_text
     assert "knowledge-importer" in help_text
 
 
@@ -93,6 +94,17 @@ def test_convert_help_describes_directory_options(capsys: object) -> None:
     assert "--manifest-json" in help_text
     assert "--normalize-markdown PROFILE" in help_text
     assert "--metadata-sidecar" in help_text
+
+
+def test_validate_help_describes_package_options(capsys: object) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["validate", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "--manifest PATH" in help_text
+    assert "--report-json PATH" in help_text
+    assert "--strict" in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:

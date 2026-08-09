@@ -48,6 +48,11 @@ from knowledge_importer.models import (
     KnowledgeImporterError,
     OutputExistsError,
 )
+from knowledge_importer.package_validation import (
+    ValidationSeverity,
+    validate_package,
+    write_validation_report,
+)
 from knowledge_importer.quality_report import (
     QualityReport,
     QualityReportItem,
@@ -212,6 +217,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="成功・スキップしたMarkdownの隣へmetadata JSONを生成",
     )
+    validate_parser = subparsers.add_parser(
+        "validate",
+        help="既存Knowledge Packageをread-only検証",
+    )
+    validate_parser.add_argument("package_root", type=Path, help="検証するpackage root")
+    validate_parser.add_argument(
+        "--manifest",
+        type=Path,
+        metavar="PATH",
+        help="整合確認するArtifact Manifest v1",
+    )
+    validate_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        help="決定的なvalidation JSON reportを出力",
+    )
+    validate_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Manifest外のextra Markdownもfailureとして扱う",
+    )
     return parser
 
 
@@ -243,12 +270,66 @@ def _metadata_sidecars_conflict(
     return False
 
 
+def _run_package_validation(
+    package_root: Path,
+    *,
+    manifest_path: Path | None,
+    report_json: Path | None,
+    strict: bool,
+) -> int:
+    if not package_root.is_dir() or _is_linked_directory(package_root):
+        print("エラー: 存在する通常のpackage rootディレクトリを指定してください", file=sys.stderr)
+        return 2
+    if manifest_path is not None and not manifest_path.is_file():
+        print("エラー: --manifestには存在するファイルを指定してください", file=sys.stderr)
+        return 2
+    if report_json is not None and (
+        report_json.name.casefold().endswith(".metadata.json")
+        or report_json.suffix.casefold() == ".md"
+        or (manifest_path is not None and _paths_are_equal(report_json, manifest_path))
+    ):
+        print("エラー: validation reportの出力先が検証対象と競合します", file=sys.stderr)
+        return 2
+
+    result = validate_package(
+        package_root,
+        manifest_path=manifest_path,
+        strict=strict,
+    )
+    for issue in result.issues:
+        prefix = "検証失敗" if issue.severity is ValidationSeverity.ERROR else "検証警告"
+        print(
+            f"{prefix}: ファイル={issue.path} 分類={issue.category} 理由={issue.message}",
+            file=sys.stderr,
+        )
+    print(
+        "Knowledge Package検証完了: "
+        f"対象={len(result.checked_paths)} 成功={result.passed} "
+        f"失敗={result.failed} 警告={result.warnings}"
+    )
+    if report_json is not None:
+        try:
+            write_validation_report(report_json, result)
+        except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+            LOGGER.error("validation_report_write_failed exception_type=%s", type(exc).__name__)
+            print("Validation reportを書き込めませんでした。", file=sys.stderr)
+            return 2
+    return result.exit_code
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
     converter_factory: Callable[..., Converter] = build_docling_converter,
 ) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "validate":
+        return _run_package_validation(
+            args.package_root,
+            manifest_path=args.manifest,
+            report_json=args.report_json,
+            strict=args.strict,
+        )
     if (
         args.normalize_markdown is not None
         and args.normalize_markdown not in SUPPORTED_NORMALIZATION_PROFILES
