@@ -58,6 +58,11 @@ from knowledge_importer.quality_report import (
     QualityReportItem,
     write_quality_report,
 )
+from knowledge_importer.repair_approval import (
+    build_repair_approval,
+    is_repair_approval_report,
+    write_repair_approval,
+)
 from knowledge_importer.repair_plan import (
     build_repair_plan,
     is_repair_plan_report,
@@ -266,6 +271,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Manifest外のextra Markdownも修復候補として扱う",
     )
+    approve_repair_parser = subparsers.add_parser(
+        "approve-repair",
+        help="Repair Planのsafe actionを明示承認",
+    )
+    approve_repair_parser.add_argument("plan_json", type=Path, help="承認するRepair Plan v1")
+    approve_repair_parser.add_argument(
+        "--all-safe",
+        action="store_true",
+        required=True,
+        help="safe=trueの全actionだけを承認",
+    )
+    approve_repair_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        required=True,
+        help="決定的なApproval JSONの出力先",
+    )
     return parser
 
 
@@ -400,6 +423,34 @@ def _run_repair_plan(
     return 0
 
 
+def _run_repair_approval(plan_path: Path, *, report_json: Path) -> int:
+    if plan_path.is_symlink() or not plan_path.is_file():
+        print("エラー: 存在する通常のRepair Plan fileを指定してください", file=sys.stderr)
+        return 2
+    if _paths_are_equal(plan_path, report_json):
+        print("エラー: Approvalの出力先がRepair Planと競合します", file=sys.stderr)
+        return 2
+    if (report_json.is_symlink() or report_json.exists()) and not is_repair_approval_report(
+        report_json
+    ):
+        print("エラー: 既存のRepair Approval以外は上書きできません", file=sys.stderr)
+        return 2
+    try:
+        approval = build_repair_approval(plan_path)
+    except Exception as exc:  # noqa: BLE001 - invalid plans map to exit code 2.
+        LOGGER.error("repair_approval_plan_invalid exception_type=%s", type(exc).__name__)
+        print("Repair Planを検証できませんでした。", file=sys.stderr)
+        return 2
+    try:
+        write_repair_approval(report_json, approval)
+    except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+        LOGGER.error("repair_approval_write_failed exception_type=%s", type(exc).__name__)
+        print("Repair Approvalを書き込めませんでした。", file=sys.stderr)
+        return 2
+    print(f"Repair承認を生成しました: 承認action={len(approval.approved_actions)}")
+    return 0
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -420,6 +471,8 @@ def run(
             report_json=args.report_json,
             strict=args.strict,
         )
+    if args.command == "approve-repair":
+        return _run_repair_approval(args.plan_json, report_json=args.report_json)
     if (
         args.normalize_markdown is not None
         and args.normalize_markdown not in SUPPORTED_NORMALIZATION_PROFILES

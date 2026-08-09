@@ -149,17 +149,67 @@ def _is_relative_posix_path(value: object) -> bool:
     return not path.is_absolute() and all(part not in {"", ".", ".."} for part in path.parts)
 
 
-def _is_repair_action_payload(value: object) -> bool:
+def parse_repair_action(value: object) -> RepairAction:
+    """Parse one Repair Plan v1 action without reinterpreting its fields."""
+
     if not isinstance(value, dict):
-        return False
+        raise ValueError("invalid Repair Plan action")
     action_values = {category.value for category in RepairActionCategory}
-    return (
+    valid = (
         _is_relative_posix_path(value.get("path"))
         and value.get("action") in action_values
         and isinstance(value.get("reason_category"), str)
         and bool(value.get("reason_category"))
         and isinstance(value.get("safe"), bool)
     )
+    if not valid:
+        raise ValueError("invalid Repair Plan action")
+    return RepairAction(
+        path=value["path"],
+        action=RepairActionCategory(value["action"]),
+        reason_category=value["reason_category"],
+        safe=value["safe"],
+    )
+
+
+def parse_repair_plan_bytes(content: bytes) -> RepairPlan:
+    """Parse and validate Repair Plan v1 from its original file bytes."""
+
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid Repair Plan JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("invalid Repair Plan root")
+    summary = payload.get("summary")
+    raw_actions = payload.get("actions")
+    if not isinstance(summary, dict) or not isinstance(raw_actions, list):
+        raise ValueError("invalid Repair Plan containers")
+    issue_count = summary.get("issues")
+    action_count = summary.get("actions")
+    manual_review = summary.get("manual_review")
+    if not (
+        payload.get("report_type") == "knowledge-package-repair-plan"
+        and payload.get("schema_version") == 1
+        and not isinstance(payload.get("schema_version"), bool)
+        and all(_is_nonnegative_int(value) for value in (issue_count, action_count, manual_review))
+    ):
+        raise ValueError("invalid Repair Plan schema")
+    actions = tuple(parse_repair_action(action) for action in raw_actions)
+    if not (
+        action_count == len(actions)
+        and issue_count >= action_count
+        and manual_review
+        == sum(action.action is RepairActionCategory.MANUAL_REVIEW for action in actions)
+    ):
+        raise ValueError("invalid Repair Plan summary")
+    return RepairPlan(issues=issue_count, actions=actions)
+
+
+def read_repair_plan(path: Path) -> RepairPlan:
+    """Read and validate a Repair Plan v1 file."""
+
+    return parse_repair_plan_bytes(path.read_bytes())
 
 
 def is_repair_plan_report(path: Path) -> bool:
@@ -168,30 +218,7 @@ def is_repair_plan_report(path: Path) -> bool:
     if path.is_symlink() or not path.is_file():
         return False
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        read_repair_plan(path)
+    except (OSError, ValueError):
         return False
-    if not isinstance(payload, dict):
-        return False
-    summary = payload.get("summary")
-    actions = payload.get("actions")
-    if not isinstance(summary, dict) or not isinstance(actions, list):
-        return False
-    issue_count = summary.get("issues")
-    action_count = summary.get("actions")
-    manual_review = summary.get("manual_review")
-    return (
-        payload.get("report_type") == "knowledge-package-repair-plan"
-        and payload.get("schema_version") == 1
-        and not isinstance(payload.get("schema_version"), bool)
-        and all(_is_nonnegative_int(value) for value in (issue_count, action_count, manual_review))
-        and action_count == len(actions)
-        and issue_count >= action_count
-        and manual_review
-        == sum(
-            isinstance(action, dict)
-            and action.get("action") == RepairActionCategory.MANUAL_REVIEW.value
-            for action in actions
-        )
-        and all(_is_repair_action_payload(action) for action in actions)
-    )
+    return True
