@@ -248,3 +248,47 @@ Metadata Sidecar schema v1はBatch JSON schema v1、CSV、Quality JSON schema v1
 issueは相対path、category、severity、messageの固定順でsortingします。同じpackageとoptionからはstdout summaryとreport JSON bytesが同一です。validation reportはUTF-8、2-space indent、末尾改行付きで共通atomic JSON writerから出力します。absolute path、timestamp、hostname、username、cwd、command lineを含めません。
 
 unknown fieldはforward compatibilityのため許容します。required fieldの削除、型・semantic・severity/category contractのbreaking changeにはvalidation reportのschema version更新が必要です。validationはMarkdown、sidecar、Manifest、PDFを修復・再生成・削除しません。
+
+## Knowledge Package Repair Plan v1
+
+`knowledge-importer repair-plan PACKAGE_ROOT`はKnowledge Package Validation v1の結果を再利用し、実ファイルを変更せず修復候補だけを生成します。`--manifest PATH`と`--strict`はvalidationと同じsemanticsを使い、`--report-json PATH`指定時だけ次の独立reportをatomic出力します。
+
+```json
+{
+  "report_type": "knowledge-package-repair-plan",
+  "schema_version": 1,
+  "summary": {
+    "issues": 2,
+    "actions": 2,
+    "manual_review": 1
+  },
+  "actions": [
+    {
+      "path": "section/a.metadata.json",
+      "action": "regenerate-sidecar",
+      "reason_category": "missing-sidecar",
+      "safe": true
+    }
+  ]
+}
+```
+
+### Action contract
+
+| Action | Meaning |
+|---|---|
+| `regenerate-sidecar` | validなManifest itemに対応するmissing sidecarの再生成候補 |
+| `remove-stale-sidecar` | validなManifestのfailed itemに残るsidecarの削除候補 |
+| `regenerate-manifest` | strict時に検出したextra Markdownを反映するManifest再生成候補 |
+| `verify-artifact` | 将来のartifact確認action用に予約。v1 plannerは現在生成しない |
+| `manual-review` | 正しいartifact・sidecar・Manifestを自動決定できないため人の判断が必要 |
+
+`safe=true`は操作の意味が一意であることだけを示し、自動実行の許可や実行済みを意味しません。v1ではvalidなManifestに基づく`missing-sidecar`と`stale-sidecar`だけが対象です。Manifestがinvalidまたは未指定ならsafe actionを推測せず、ambiguousなerrorは`manual-review`とします。artifact digest・size、Manifest/sidecar、path、settings、schema、missing artifact、outside-rootなどの不整合ではMarkdown、sidecar、Manifestのいずれも正とは決め打ちしません。
+
+default validationのwarningは`summary.issues`に含めますがactionを生成しません。`--strict`でerrorとなる`extra-artifact`だけ、`safe=false`の`regenerate-manifest`候補にします。Manifestなしではsidecar単体validation issueだけを変換し、missing/stale/orphan判定や自動修復方向を推測しません。
+
+### Determinism, write boundary, and exit codes
+
+actionはNFC・case-insensitiveなpath、action、reason categoryの順で固定sortingします。JSONはUTF-8、2-space indent、末尾改行付きで、timestamp、hostname、username、絶対path、cwd、command line、cache path、random IDを含めません。同一packageとvalidation modeから同一JSON bytesを生成します。
+
+Markdown、Metadata Sidecar、Artifact Manifest、PDF、Batch JSON、CSV、Quality JSONは一切変更しません。`--report-json`だけが共通atomic writerによる書込み境界です。終了コードはplan生成成功（issueの有無を問わない）が`0`、CLI input・Manifest指定・report書込みerrorが`2`です。repair execution、sidecar生成・削除、Manifest・digest更新、変換、normalization、Local RAG登録は別フェーズです。

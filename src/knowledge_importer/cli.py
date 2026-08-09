@@ -58,6 +58,7 @@ from knowledge_importer.quality_report import (
     QualityReportItem,
     write_quality_report,
 )
+from knowledge_importer.repair_plan import build_repair_plan, write_repair_plan
 
 LOGGER = logging.getLogger("knowledge_importer")
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\)[^\s]+")
@@ -239,6 +240,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Manifest外のextra Markdownもfailureとして扱う",
     )
+    repair_plan_parser = subparsers.add_parser(
+        "repair-plan",
+        help="Knowledge Packageのread-only修復計画を生成",
+    )
+    repair_plan_parser.add_argument("package_root", type=Path, help="検証するpackage root")
+    repair_plan_parser.add_argument(
+        "--manifest",
+        type=Path,
+        metavar="PATH",
+        help="整合確認するArtifact Manifest v1",
+    )
+    repair_plan_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        help="決定的なRepair Plan JSONを出力",
+    )
+    repair_plan_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Manifest外のextra Markdownも修復候補として扱う",
+    )
     return parser
 
 
@@ -317,6 +340,55 @@ def _run_package_validation(
     return result.exit_code
 
 
+def _run_repair_plan(
+    package_root: Path,
+    *,
+    manifest_path: Path | None,
+    report_json: Path | None,
+    strict: bool,
+) -> int:
+    if not package_root.is_dir() or _is_linked_directory(package_root):
+        print("エラー: 存在する通常のpackage rootディレクトリを指定してください", file=sys.stderr)
+        return 2
+    if manifest_path is not None and not manifest_path.is_file():
+        print("エラー: --manifestには存在するファイルを指定してください", file=sys.stderr)
+        return 2
+    if report_json is not None and (
+        report_json.name.casefold().endswith(".metadata.json")
+        or report_json.suffix.casefold() == ".md"
+        or (manifest_path is not None and _paths_are_equal(report_json, manifest_path))
+    ):
+        print("エラー: Repair Planの出力先が検証対象と競合します", file=sys.stderr)
+        return 2
+
+    validation_result = validate_package(
+        package_root,
+        manifest_path=manifest_path,
+        strict=strict,
+    )
+    plan = build_repair_plan(
+        validation_result,
+        manifest_name=manifest_path.name if manifest_path is not None else None,
+    )
+    print(
+        "Knowledge Package修復計画: "
+        f"問題={plan.issues} 修復候補={len(plan.actions)} 手動確認={plan.manual_review}"
+    )
+    for action in plan.actions:
+        print(
+            f"修復候補: ファイル={action.path} 操作={action.action.value} "
+            f"理由分類={action.reason_category} safe={str(action.safe).lower()}"
+        )
+    if report_json is not None:
+        try:
+            write_repair_plan(report_json, plan)
+        except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+            LOGGER.error("repair_plan_write_failed exception_type=%s", type(exc).__name__)
+            print("Repair Planを書き込めませんでした。", file=sys.stderr)
+            return 2
+    return 0
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -325,6 +397,13 @@ def run(
     args = build_parser().parse_args(argv)
     if args.command == "validate":
         return _run_package_validation(
+            args.package_root,
+            manifest_path=args.manifest,
+            report_json=args.report_json,
+            strict=args.strict,
+        )
+    if args.command == "repair-plan":
+        return _run_repair_plan(
             args.package_root,
             manifest_path=args.manifest,
             report_json=args.report_json,
