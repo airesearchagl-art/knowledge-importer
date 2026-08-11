@@ -92,7 +92,7 @@ class _SidecarRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class _ManifestRecord:
+class ManifestRecord:
     input_path: str
     output_path: str
     status: str
@@ -333,7 +333,7 @@ def _parse_sidecar(
 def _parse_manifest(
     path: Path,
 ) -> tuple[
-    tuple[_ManifestRecord, ...] | None,
+    tuple[ManifestRecord, ...] | None,
     dict[str, str] | None,
     dict[str, object] | None,
     list[ValidationIssue],
@@ -403,7 +403,7 @@ def _parse_manifest(
     ):
         return None, None, None, [_invalid_schema(display_path, "Manifest設定が不正です")]
 
-    records: list[_ManifestRecord] = []
+    records: list[ManifestRecord] = []
     for raw_item in items:
         if not isinstance(raw_item, dict):
             return None, None, None, [_invalid_schema(display_path, "Manifest itemが不正です")]
@@ -463,7 +463,7 @@ def _parse_manifest(
         ):
             return None, None, None, [_invalid_schema(display_path, "Manifest digestが不正です")]
         records.append(
-            _ManifestRecord(
+            ManifestRecord(
                 input_path,
                 output_path,
                 status,
@@ -482,7 +482,7 @@ def _parse_manifest(
 
 
 def _compare_manifest(
-    records: tuple[_ManifestRecord, ...],
+    records: tuple[ManifestRecord, ...],
     manifest_engine: dict[str, str],
     manifest_settings: dict[str, object],
     sidecars: dict[str, _SidecarRecord],
@@ -571,6 +571,15 @@ def _compare_manifest(
                 )
             )
     return issues
+
+
+def read_manifest_records(path: Path) -> tuple[ManifestRecord, ...]:
+    """Read Artifact Manifest v1 records through the validation parser."""
+
+    records, engine, settings, issues = _parse_manifest(path)
+    if records is None or engine is None or settings is None or issues:
+        raise ValueError("invalid Artifact Manifest")
+    return records
 
 
 def validate_package(

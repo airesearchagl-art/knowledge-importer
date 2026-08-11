@@ -48,6 +48,7 @@ EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/quality_report.py",
     "knowledge_importer/repair_approval.py",
     "knowledge_importer/repair_plan.py",
+    "knowledge_importer/repair_preflight.py",
 }
 
 
@@ -162,6 +163,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     validate_help = _run_command([str(cli), "validate", "--help"])
     repair_plan_help = _run_command([str(cli), "repair-plan", "--help"])
     approve_repair_help = _run_command([str(cli), "approve-repair", "--help"])
+    repair_preflight_help = _run_command([str(cli), "repair-preflight", "--help"])
     module_help = _run_command([str(python), "-m", "knowledge_importer", "--help"])
     for option in EXPECTED_OPTIONS:
         assert option in cli_help
@@ -169,11 +171,14 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "validate" in module_help
     assert "repair-plan" in module_help
     assert "approve-repair" in module_help
+    assert "repair-preflight" in module_help
     for option in ("--manifest", "--report-json", "--strict"):
         assert option in validate_help
         assert option in repair_plan_help
     for option in ("--all-safe", "--report-json"):
         assert option in approve_repair_help
+    for option in ("--manifest", "--plan", "--approval", "--report-json"):
+        assert option in repair_preflight_help
     metadata = _run_command(
         [
             str(python),
@@ -184,7 +189,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
                 "knowledge_importer.json_writer, "
                 "knowledge_importer.markdown_quality, knowledge_importer.package_validation, "
                 "knowledge_importer.quality_report, knowledge_importer.repair_approval, "
-                "knowledge_importer.repair_plan; "
+                "knowledge_importer.repair_plan, knowledge_importer.repair_preflight; "
                 "print(version('knowledge-importer'))"
             ),
         ]
@@ -201,6 +206,7 @@ def test_readme_documents_every_public_batch_option() -> None:
         assert option in readme
     assert "approve-repair" in readme
     assert "--all-safe" in readme
+    assert "repair-preflight" in readme
     assert version("knowledge-importer") == "0.1.0"
 
 

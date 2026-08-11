@@ -343,3 +343,56 @@ v1のscopeは`all-safe`だけです。Repair Plan parserは`regenerate-sidecar =
 8. rollback / backup方針を定義する
 
 Approval v1は上記execution、artifact変更、rollbackを実装しません。
+
+## Repair Execution Preflight v1
+
+`knowledge-importer repair-preflight PACKAGE_ROOT --plan PLAN_JSON --approval APPROVAL_JSON`は、将来のRepair Execution直前条件をread-onlyで判定します。Plan v1はManifest pathを保持しないため、ready判定には`--manifest MANIFEST_JSON`を明示します。未指定時はsafe actionを推測せず`manifest-invalid`でblockedにします。`--report-json`だけが書込み境界で、package artifactは変更しません。
+
+```json
+{
+  "report_type": "knowledge-package-repair-preflight",
+  "schema_version": 1,
+  "summary": {"actions": 1, "ready": 1, "blocked": 0},
+  "plan": {"sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+  "approval": {"sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+  "actions": [
+    {
+      "path": "section/a.metadata.json",
+      "action": "regenerate-sidecar",
+      "reason_category": "missing-sidecar",
+      "status": "ready",
+      "block_reason": null,
+      "preconditions": {
+        "plan_approved": true,
+        "safe": true,
+        "package_state_matches": true,
+        "backup_required": false
+      },
+      "target": {
+        "path": "section/a.metadata.json",
+        "exists": false,
+        "bytes": null,
+        "sha256": null
+      }
+    }
+  ]
+}
+```
+
+### Binding and current-state contract
+
+PreflightはRepair Plan v1とApproval v1をそれぞれ元file bytesからparseし、実Plan bytesのSHA-256とApproval bindingを再照合します。Approval actionはPlanの全safe actionとpath、action、reason category、safe、順序まで完全一致する必要があります。unsafe action、manual-review、Plan外action、欠落action、digest不一致はartifact検証前に終了コード`2`で拒否します。
+
+binding成立後にKnowledge Package Validation v1を再実行します。`regenerate-sidecar / missing-sidecar`はvalid Manifestのsucceeded/skipped item、source digest、現Markdownのsize・SHA-256、sidecar不在、安全なpackage内pathを必要とします。`remove-stale-sidecar / stale-sidecar`はvalid Manifestのfailed item、expected path上の通常file、package内path、非symlinkを必要とし、対象bytes・SHA-256を`target`へ保存します。Plan生成後にreasonが消えた場合やdigest・status・存在状態が変わった場合は`blocked / package-state-changed`です。invalid Manifestは`manifest-invalid`、unsafe pathは`path-unsafe`、v1非対応actionは`unsupported-action`でblockedにします。
+
+actionはNFC・case-insensitive path、action、reason categoryの順で固定します。同一package bytes、Plan bytes、Approval bytesから同一JSON bytesを生成し、timestamp、hostname、username、cwd、command line、absolute path、random IDを含めません。有効なPreflight v1自身だけ共通atomic writerで更新でき、Plan、Approval、Manifest、Metadata Sidecar、Markdown、CSV、Batch JSON、Quality JSON、directory、symlink、invalid fileを上書きしません。終了コードは全action ready（0件を含む）が`0`、blockedを1件以上含む場合が`1`、CLI input・binding・report書込みerrorが`2`です。
+
+### Future execution, backup, rollback, and partial failure
+
+このschemaはexecution permissionではなく、read-onlyな時点証明です。将来Executionは実行直前にPlan、Approval、Preflight target digestとpackage状態を再検証し、v1では`regenerate-sidecar`と`remove-stale-sidecar`だけを対象にします。
+
+- `regenerate-sidecar`: 新規fileなのでbackup不要。same-directory temporary fileからatomic replaceし、失敗時はfileなし状態を維持する
+- `remove-stale-sidecar`: 直接`unlink`せず、削除前にpackage外または専用temporary/backup領域へ退避し、元bytesへrollback可能にする。machine-readable reportへbackupのabsolute pathを記録しない
+- partial failure: deterministic orderで逐次実行し、最初の失敗で停止するfail-fastを採用する。可能な範囲をrollbackし、事前Planからずれた状態で後続actionを継続しない
+
+Preflight v1は上記execution、backup、rollback、sidecar生成・削除、Manifest更新を実装しません。
