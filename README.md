@@ -153,6 +153,22 @@ Approvalは入力Repair Plan fileの実bytesをstreaming SHA-256でhashし、low
 
 既存の`--report-json`出力は有効なApproval schema version 1自身だけatomic更新でき、Repair Plan、Artifact Manifest、Metadata Sidecar、Markdown、Batch JSON、Quality JSON、CSV、directory、symlink、読取り不能・不完全Approvalは入力Planを読む前に拒否します。Approval以外のpackage fileは変更しません。
 
+### Repair execution preflight
+
+```powershell
+uv run knowledge-importer repair-preflight .\output `
+  --manifest .\reports\artifacts.json `
+  --plan .\reports\repair-plan.json `
+  --approval .\reports\repair-approval.json `
+  --report-json .\reports\repair-preflight.json
+```
+
+`repair-preflight PACKAGE_ROOT`はRepair Plan v1、Approval v1、明示指定したArtifact Manifest v1と現在のpackage状態を照合するread-only commandです。`--plan`と`--approval`が必須です。ManifestはPlan v1にpathを保持しないため暗黙探索せず、`--manifest`未指定時はsafe actionをreadyと推測せず`manifest-invalid`でblockedにします。Plan実bytesのSHA-256 binding、approved actionの完全一致、safe semanticを先に検証し、その後にKnowledge Package Validation v1を再実行します。
+
+承認済み`regenerate-sidecar`はsidecarが未作成で、Manifest itemがsucceeded/skipped、Markdownのsize・SHA-256とsource digestが有効な場合だけ`ready`です。`remove-stale-sidecar`はfailed Manifest itemに対応する通常fileのstale sidecarが現在も存在する場合だけ`ready`で、削除対象のbytes・SHA-256をPreflightへ記録します。状態が変わったactionは`blocked / package-state-changed`となりますが、Markdown生成、sidecar生成・削除、Manifest更新、backup、rollback、repair executionは行いません。
+
+終了コードは全approved actionがready（0件を含む）なら`0`、1件以上blockedなら`1`、CLI input・Plan/Approval binding・report書込みerrorなら`2`です。Preflight JSONは相対POSIX pathと決定的なdigestだけを含み、有効なPreflight schema v1自身のみatomic更新できます。将来のExecution v1は逐次・fail-fastとし、`regenerate-sidecar`はatomicな新規作成、`remove-stale-sidecar`はpackage外または専用領域へのbackupとrollbackを必須にする契約です。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell

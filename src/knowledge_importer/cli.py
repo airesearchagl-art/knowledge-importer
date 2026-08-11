@@ -68,6 +68,11 @@ from knowledge_importer.repair_plan import (
     is_repair_plan_report,
     write_repair_plan,
 )
+from knowledge_importer.repair_preflight import (
+    build_repair_preflight,
+    is_repair_preflight_report,
+    write_repair_preflight,
+)
 
 LOGGER = logging.getLogger("knowledge_importer")
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\)[^\s]+")
@@ -289,6 +294,37 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="決定的なApproval JSONの出力先",
     )
+    repair_preflight_parser = subparsers.add_parser(
+        "repair-preflight",
+        help="承認済みrepair actionの実行前提をread-only検証",
+    )
+    repair_preflight_parser.add_argument("package_root", type=Path, help="検証するpackage root")
+    repair_preflight_parser.add_argument(
+        "--manifest",
+        type=Path,
+        metavar="PATH",
+        help="ready判定の基準となるArtifact Manifest v1",
+    )
+    repair_preflight_parser.add_argument(
+        "--plan",
+        type=Path,
+        metavar="PLAN_JSON",
+        required=True,
+        help="検証するRepair Plan v1",
+    )
+    repair_preflight_parser.add_argument(
+        "--approval",
+        type=Path,
+        metavar="APPROVAL_JSON",
+        required=True,
+        help="検証するRepair Approval v1",
+    )
+    repair_preflight_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        help="決定的なPreflight JSONの出力先",
+    )
     return parser
 
 
@@ -451,6 +487,67 @@ def _run_repair_approval(plan_path: Path, *, report_json: Path) -> int:
     return 0
 
 
+def _run_repair_preflight(
+    package_root: Path,
+    *,
+    manifest_path: Path | None,
+    plan_path: Path,
+    approval_path: Path,
+    report_json: Path | None,
+) -> int:
+    if not package_root.is_dir() or _is_linked_directory(package_root):
+        print("エラー: 存在する通常のpackage rootディレクトリを指定してください", file=sys.stderr)
+        return 2
+    inputs = (plan_path, approval_path) + ((manifest_path,) if manifest_path is not None else ())
+    if any(path.is_symlink() or not path.is_file() for path in inputs):
+        print(
+            "エラー: Manifest、Repair Plan、Approvalには通常fileを指定してください", file=sys.stderr
+        )
+        return 2
+    if report_json is not None and (
+        report_json.name.casefold().endswith(".metadata.json")
+        or report_json.suffix.casefold() in {".md", ".csv"}
+        or any(_paths_are_equal(report_json, path) for path in inputs)
+    ):
+        print("エラー: Preflight reportの出力先が検証対象と競合します", file=sys.stderr)
+        return 2
+    if (
+        report_json is not None
+        and (report_json.is_symlink() or report_json.exists())
+        and not is_repair_preflight_report(report_json)
+    ):
+        print("エラー: 既存のRepair Preflight以外は上書きできません", file=sys.stderr)
+        return 2
+    try:
+        preflight = build_repair_preflight(
+            package_root,
+            manifest_path=manifest_path,
+            plan_path=plan_path,
+            approval_path=approval_path,
+        )
+    except Exception as exc:  # noqa: BLE001 - invalid bindings map to exit code 2.
+        LOGGER.error("repair_preflight_invalid exception_type=%s", type(exc).__name__)
+        print("Repair Preflightの入力またはbindingを検証できませんでした。", file=sys.stderr)
+        return 2
+    for action in preflight.actions:
+        print(
+            f"実行前提: ファイル={action.repair_action.path} "
+            f"操作={action.repair_action.action.value} status={action.status}"
+        )
+    print(
+        "Repair実行前検証: "
+        f"action={len(preflight.actions)} ready={preflight.ready} blocked={preflight.blocked}"
+    )
+    if report_json is not None:
+        try:
+            write_repair_preflight(report_json, preflight)
+        except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+            LOGGER.error("repair_preflight_write_failed exception_type=%s", type(exc).__name__)
+            print("Repair Preflight reportを書き込めませんでした。", file=sys.stderr)
+            return 2
+    return preflight.exit_code
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -473,6 +570,14 @@ def run(
         )
     if args.command == "approve-repair":
         return _run_repair_approval(args.plan_json, report_json=args.report_json)
+    if args.command == "repair-preflight":
+        return _run_repair_preflight(
+            args.package_root,
+            manifest_path=args.manifest,
+            plan_path=args.plan,
+            approval_path=args.approval,
+            report_json=args.report_json,
+        )
     if (
         args.normalize_markdown is not None
         and args.normalize_markdown not in SUPPORTED_NORMALIZATION_PROFILES
