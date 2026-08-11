@@ -140,6 +140,19 @@ uv run knowledge-importer repair-plan .\output --manifest .\reports\artifacts.js
 
 Manifestなしではsidecar単体validationだけを計画へ利用し、安全なmissing/stale判定を推測しません。invalidなManifestに関連する候補も`manual-review`へ落とします。既存の`--report-json`出力はRepair Plan schema version 1自身だけatomic更新でき、Batch JSON、Quality JSON、Artifact Manifest、Metadata Sidecar、Markdown、CSVなど他の既存fileはvalidation実行前に拒否します。計画生成成功はissueの有無にかかわらず終了コード`0`、package root・Manifest・report出力などのCLI/I/O errorは`2`です。出力は相対POSIX pathのみで、同一package・optionから同一action順・同一JSON bytesを生成します。
 
+### Repair Execution Approval / Human Gate
+
+```powershell
+uv run knowledge-importer approve-repair .\reports\repair-plan.json `
+  --all-safe --report-json .\reports\repair-approval.json
+```
+
+`approve-repair PLAN_JSON`はRepair Plan schema version 1を検証し、`safe=true`かつ`manual-review`ではないactionだけをApproval schema version 1へそのままコピーします。Plan validationでは`regenerate-sidecar`を`missing-sidecar / safe=true`、`remove-stale-sidecar`を`stale-sidecar / safe=true`へ固定し、`regenerate-manifest`、`verify-artifact`、`manual-review`の`safe=true`偽装を拒否します。`safe=false`や`manual-review`を承認するescape hatch、個別selector、identity、電子署名はありません。safe actionが0件でも空の有効Approvalを生成します。このHuman Gateは承認記録を作るだけで、repair execution、sidecar生成・削除、Manifest・digest更新、変換、normalizationは実行しません。
+
+Approvalは入力Repair Plan fileの実bytesをstreaming SHA-256でhashし、lowercase 64桁hexとして保持します。parse後の再serialize結果、path、mtimeはhash材料にしないため、Planが1 byteでも変わるとApprovalとのbindingが失われます。同一Plan bytesと`all-safe` scopeからは同一Approval JSON bytesを生成します。
+
+既存の`--report-json`出力は有効なApproval schema version 1自身だけatomic更新でき、Repair Plan、Artifact Manifest、Metadata Sidecar、Markdown、Batch JSON、Quality JSON、CSV、directory、symlink、読取り不能・不完全Approvalは入力Planを読む前に拒否します。Approval以外のpackage fileは変更しません。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell

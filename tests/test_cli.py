@@ -74,6 +74,7 @@ def test_help_describes_convert_command() -> None:
     assert "convert" in help_text
     assert "validate" in help_text
     assert "repair-plan" in help_text
+    assert "approve-repair" in help_text
     assert "knowledge-importer" in help_text
 
 
@@ -117,6 +118,23 @@ def test_repair_plan_help_describes_package_options(capsys: object) -> None:
     assert "--manifest PATH" in help_text
     assert "--report-json PATH" in help_text
     assert "--strict" in help_text
+
+
+def test_approve_repair_help_describes_human_gate_options(capsys: object) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["approve-repair", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "--all-safe" in help_text
+    assert "--report-json PATH" in help_text
+
+
+def test_approve_repair_requires_explicit_all_safe_scope() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["approve-repair", "plan.json", "--report-json", "approval.json"])
+
+    assert exc_info.value.code == 2
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:

@@ -292,3 +292,54 @@ default validationのwarningは`summary.issues`に含めますがactionを生成
 actionはNFC・case-insensitiveなpath、action、reason categoryの順で固定sortingします。JSONはUTF-8、2-space indent、末尾改行付きで、timestamp、hostname、username、絶対path、cwd、command line、cache path、random IDを含めません。同一packageとvalidation modeから同一JSON bytesを生成します。
 
 Markdown、Metadata Sidecar、Artifact Manifest、PDF、Batch JSON、CSV、Quality JSONは一切変更しません。`--report-json`だけが共通atomic writerによる書込み境界です。既存fileへの出力は`report_type=knowledge-package-repair-plan`、`schema_version=1`および必須container型を満たすRepair Plan自身だけ許可し、その他はvalidation・planning前に拒否します。終了コードはplan生成成功（issueの有無を問わない）が`0`、CLI input・Manifest指定・report書込みerrorが`2`です。repair execution、sidecar生成・削除、Manifest・digest更新、変換、normalization、Local RAG登録は別フェーズです。
+
+## Repair Execution Approval v1
+
+`knowledge-importer approve-repair PLAN_JSON --all-safe --report-json PATH`は、有効なRepair Plan v1へHuman Gate承認をbindingするread-only commandです。Approval生成以外のfile変更やrepair executionは行いません。
+
+```json
+{
+  "report_type": "knowledge-package-repair-approval",
+  "schema_version": 1,
+  "plan": {
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "schema_version": 1
+  },
+  "scope": {
+    "mode": "all-safe"
+  },
+  "approved_actions": [
+    {
+      "path": "section/a.metadata.json",
+      "action": "regenerate-sidecar",
+      "reason_category": "missing-sidecar",
+      "safe": true
+    }
+  ]
+}
+```
+
+### Plan binding and scope
+
+`plan.sha256`はRepair Plan fileの実bytesだけをstreaming SHA-256へ入力したlowercase 64桁hexです。parse後payloadの再serialize、path、mtime、timestamp、host情報はhash材料に含めません。`plan.schema_version`はbinding対象がRepair Plan v1であることを表します。
+
+v1のscopeは`all-safe`だけです。Repair Plan parserは`regenerate-sidecar = missing-sidecar / safe=true`、`remove-stale-sidecar = stale-sidecar / safe=true`、`regenerate-manifest = extra-artifact / safe=false`を必須とし、`verify-artifact`と`manual-review`も常に`safe=false`とします。このsemantic invariantに反するPlanはschema v1として拒否します。承認時は検証済みPlanの`safe=true` actionから`manual-review`を除外し、path、action、reason category、safeを変更・再解釈せず元の順序でコピーします。`safe=false`や`manual-review`の承認、個別action selector、approver identity、username、email、hostname、cwd、command line、timestamp、random ID、電子署名は対象外です。safe actionが0件でも`approved_actions=[]`の有効Approvalになります。
+
+### Determinism and output protection
+
+同一Repair Plan bytesとscopeからは同一action、順序、JSON bytesを生成します。Approval JSONはUTF-8、2-space indent、末尾改行付きで共通atomic writerを使用します。既存fileは有効なApproval v1自身だけ更新でき、Repair Plan、Artifact Manifest、Metadata Sidecar、Markdown、Batch JSON、Quality JSON、CSV、directory、symlink、読取り不能・invalid/incomplete ApprovalはPlan validation前に拒否します。成功は`0`、input・Plan schema・output protection・report書込みerrorは`2`です。
+
+### Future Repair Execution boundary
+
+将来Repair Executionを実装する場合も、Approvalの存在だけでは実行しません。実行直前に必ず次を満たす必要があります。
+
+1. Repair Planを再validateする
+2. Approvalの`plan.sha256`と実Plan bytesを再照合する
+3. Approvalに含まれるactionだけを対象にする
+4. 各actionの`safe=true`を再確認する
+5. 実行対象artifactの事前digestを再検証する
+6. 実行前後digestを記録する
+7. partial failure policyを定義する
+8. rollback / backup方針を定義する
+
+Approval v1は上記execution、artifact変更、rollbackを実装しません。
