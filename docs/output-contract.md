@@ -396,3 +396,52 @@ actionはNFC・case-insensitive path、action、reason categoryの順で固定�
 - partial failure: deterministic orderで逐次実行し、最初の失敗で停止するfail-fastを採用する。可能な範囲をrollbackし、事前Planからずれた状態で後続actionを継続しない
 
 Preflight v1は上記execution、backup、rollback、sidecar生成・削除、Manifest更新を実装しません。
+
+## Knowledge Package Repair Execution v1
+
+安全なlifecycleは`Validate → Plan → Approve → Preflight → Execute`です。`repair-execute`はManifest v1、Plan v1、Approval v1、Preflight v1を必須入力とし、各schema、Plan実bytes、Approval実bytes、Preflightの決定的bytesと相互bindingをpackage mutation前に再検証します。Approval actionとPreflight actionは完全一致し、全actionが`safe=true`、`ready`かつ`regenerate-sidecar`または`remove-stale-sidecar`でなければ終了コード`2`で拒否します。
+
+```json
+{
+  "report_type": "knowledge-package-repair-execution",
+  "schema_version": 1,
+  "summary": {
+    "planned": 1,
+    "executed": 1,
+    "succeeded": 1,
+    "failed": 0,
+    "rolled_back": 0,
+    "not_run": 0
+  },
+  "plan": {"sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+  "approval": {"sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+  "preflight": {"sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+  "post_validation": "passed",
+  "actions": [
+    {
+      "path": "section/a.metadata.json",
+      "action": "regenerate-sidecar",
+      "status": "succeeded",
+      "before": {"exists": false, "bytes": null, "sha256": null},
+      "after": {"exists": true, "bytes": 123, "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+      "rollback": "available"
+    }
+  ]
+}
+```
+
+### TOCTOU, mutation, and post-validation
+
+Execution開始時と各action直前に現在Preflightを再構築します。`regenerate-sidecar`はsidecar不存在、Manifest status succeeded/skipped、source digest、Markdown size・SHA-256、安全なmetadata pathを再確認し、既存Metadata Sidecar builderとatomic JSON writerで新規生成します。`remove-stale-sidecar`はfailed Manifest item、expected path、非symlink、Preflight target bytes・SHA-256を再確認してからbackupを作り、backup digest一致後だけtargetを削除します。Manifest、Markdown、Batch/Quality reportは変更しません。
+
+全action成功後にKnowledge Package Validation v1を再実行します。integrity errorまたは検証不能なら成功扱いにせず、適用済みactionを逆順rollbackします。action 0件はmutationとpost-validationを行わず成功します。
+
+### Backup, rollback, and fail-fast
+
+backup rootはpackage rootと検出可能なGit repositoryの外だけを許可します。`--backup-dir`未指定時はsystem temporary root配下へ作成し、Execution Reportへabsolute backup pathを記録しません。stale sidecarはbackup bytes・digestを確認してから削除します。
+
+v1は決定的な順序で逐次実行し、最初の失敗で停止して後続actionを`not-run`にします。生成sidecarのrollbackは実行時digestと現在digestが一致する場合だけ削除します。削除sidecarのrollbackはtargetが空の場合だけbackupからatomic復元します。外部変更との競合時は上書きせず`rollback-failed`とします。
+
+action statusは`succeeded`、`failed-precondition`、`failed`、`rolled-back`、`rollback-failed`、`not-run`、rollback statusは`not-required`、`available`、`completed`、`failed`です。終了コードは完全成功または0 actionが`0`、TOCTOU・mutation・post-validation・rollback関連失敗が`1`、input・schema・binding・output protection・report write errorが`2`です。
+
+Execution Reportは共通atomic writerで出力し、有効なExecution Report v1自身だけ更新できます。Report書込みはpackage mutation完了後の独立処理であり、書込み失敗だけを理由にpackageをrollbackしません。timestamp、hostname、username、cwd、command line、absolute path、backup path、tracebackを含めません。

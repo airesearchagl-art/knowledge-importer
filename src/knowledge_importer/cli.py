@@ -63,6 +63,12 @@ from knowledge_importer.repair_approval import (
     is_repair_approval_report,
     write_repair_approval,
 )
+from knowledge_importer.repair_execution import (
+    RepairExecutionInputError,
+    execute_repair,
+    is_execution_report,
+    write_execution_report,
+)
 from knowledge_importer.repair_plan import (
     build_repair_plan,
     is_repair_plan_report,
@@ -325,6 +331,36 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="決定的なPreflight JSONの出力先",
     )
+    repair_execute_parser = subparsers.add_parser(
+        "repair-execute",
+        help="承認・事前検証済みsafe actionを実行",
+    )
+    repair_execute_parser.add_argument("package_root", type=Path, help="修復するpackage root")
+    for option, metavar, help_text in (
+        ("--manifest", "MANIFEST_JSON", "Artifact Manifest v1"),
+        ("--plan", "PLAN_JSON", "Repair Plan v1"),
+        ("--approval", "APPROVAL_JSON", "Repair Approval v1"),
+        ("--preflight", "PREFLIGHT_JSON", "ready状態のRepair Preflight v1"),
+    ):
+        repair_execute_parser.add_argument(
+            option,
+            type=Path,
+            metavar=metavar,
+            required=True,
+            help=help_text,
+        )
+    repair_execute_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        help="決定的なExecution Report JSONの出力先",
+    )
+    repair_execute_parser.add_argument(
+        "--backup-dir",
+        type=Path,
+        metavar="BACKUP_DIR",
+        help="package・repository外のbackup保存先",
+    )
     return parser
 
 
@@ -548,6 +584,80 @@ def _run_repair_preflight(
     return preflight.exit_code
 
 
+def _run_repair_execution(
+    package_root: Path,
+    *,
+    manifest_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+    preflight_path: Path,
+    report_json: Path | None,
+    backup_dir: Path | None,
+) -> int:
+    if not package_root.is_dir() or _is_linked_directory(package_root):
+        print("エラー: 存在する通常のpackage rootディレクトリを指定してください", file=sys.stderr)
+        return 2
+    inputs = (manifest_path, plan_path, approval_path, preflight_path)
+    if any(path.is_symlink() or not path.is_file() for path in inputs):
+        print("エラー: Manifest、Plan、Approval、Preflightを検証できません", file=sys.stderr)
+        return 2
+    if report_json is not None and (
+        report_json.name.casefold().endswith(".metadata.json")
+        or report_json.suffix.casefold() in {".md", ".csv"}
+        or any(_paths_are_equal(report_json, path) for path in inputs)
+    ):
+        print("エラー: Execution Reportの出力先が実行対象と競合します", file=sys.stderr)
+        return 2
+    if (
+        report_json is not None
+        and (report_json.is_symlink() or report_json.exists())
+        and not is_execution_report(report_json)
+    ):
+        print("エラー: 既存のExecution Report以外は上書きできません", file=sys.stderr)
+        return 2
+    try:
+        report = execute_repair(
+            package_root,
+            manifest_path=manifest_path,
+            plan_path=plan_path,
+            approval_path=approval_path,
+            preflight_path=preflight_path,
+            backup_dir=backup_dir,
+        )
+    except RepairExecutionInputError as exc:
+        LOGGER.error("repair_execution_input_invalid exception_type=%s", type(exc).__name__)
+        print("Repair Executionの入力またはbindingを検証できませんでした。", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - unexpected setup failures remain sanitized.
+        LOGGER.error("repair_execution_failed exception_type=%s", type(exc).__name__)
+        print("Repair Executionを開始できませんでした。", file=sys.stderr)
+        return 2
+
+    for action in report.actions:
+        print(
+            f"修復実行: ファイル={action.repair_action.path} "
+            f"操作={action.repair_action.action.value} status={action.status}"
+        )
+    summary = report.payload()["summary"]
+    assert isinstance(summary, dict)
+    print(
+        "Repair実行完了: "
+        f"計画={summary['planned']} 成功={summary['succeeded']} "
+        f"失敗={summary['failed']} rollback={summary['rolled_back']} "
+        f"未実行={summary['not_run']}"
+    )
+    if report_json is not None:
+        try:
+            write_execution_report(report_json, report)
+        except Exception as exc:  # noqa: BLE001 - report failure must not rollback mutations.
+            LOGGER.error(
+                "repair_execution_report_write_failed exception_type=%s", type(exc).__name__
+            )
+            print("Execution Reportを書き込めませんでした。", file=sys.stderr)
+            return 2
+    return report.exit_code
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -577,6 +687,16 @@ def run(
             plan_path=args.plan,
             approval_path=args.approval,
             report_json=args.report_json,
+        )
+    if args.command == "repair-execute":
+        return _run_repair_execution(
+            args.package_root,
+            manifest_path=args.manifest,
+            plan_path=args.plan,
+            approval_path=args.approval,
+            preflight_path=args.preflight,
+            report_json=args.report_json,
+            backup_dir=args.backup_dir,
         )
     if (
         args.normalize_markdown is not None

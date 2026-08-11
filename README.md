@@ -169,6 +169,24 @@ uv run knowledge-importer repair-preflight .\output `
 
 終了コードは全approved actionがready（0件を含む）なら`0`、1件以上blockedなら`1`、CLI input・Plan/Approval binding・report書込みerrorなら`2`です。Preflight JSONは相対POSIX pathと決定的なdigestだけを含み、有効なPreflight schema v1自身のみatomic更新できます。将来のExecution v1は逐次・fail-fastとし、`regenerate-sidecar`はatomicな新規作成、`remove-stale-sidecar`はpackage外または専用領域へのbackupとrollbackを必須にする契約です。
 
+### Safe Repair Execution v1
+
+```powershell
+uv run knowledge-importer repair-execute .\output `
+  --manifest .\reports\artifacts.json `
+  --plan .\reports\repair-plan.json `
+  --approval .\reports\repair-approval.json `
+  --preflight .\reports\repair-preflight.json `
+  --backup-dir D:\safe-backups\knowledge-importer `
+  --report-json .\reports\repair-execution.json
+```
+
+`repair-execute`はPlan、Approval、Preflightの実bytes bindingとManifest v1をmutation前に再検証し、Preflightで`ready`となった`regenerate-sidecar`と`remove-stale-sidecar`だけを実行します。unsafe action、`manual-review`、`regenerate-manifest`、`verify-artifact`は実行できません。Preflight後のsidecar存在、Markdown digest、Manifest status、stale sidecar digest、path・symlink状態もaction直前に再検証します。
+
+実行は決定的な順序で逐次・fail-fastです。後続actionまたはpost-validationが失敗した場合、適用済みactionを逆順rollbackします。新規sidecarは生成bytesが変わっていない場合だけ削除し、stale sidecarは削除前にpackage・Git repository外へbackupしたbytesから、targetが空の場合だけ復元します。他processが変更・作成したfileは上書き・削除せず`rollback-failed`にします。ManifestとMarkdownは変更しません。
+
+終了コードは全action成功またはaction 0件が`0`、TOCTOU・mutation・post-validation・rollback failureが`1`、CLI/schema/binding/report path/report書込みerrorが`2`です。Execution Report書込みはmutation後の独立処理であり、report書込み失敗だけを理由に成功済みpackage変更をrollbackしません。reportには相対POSIX pathとdigestだけを記録し、backup絶対path、timestamp、username、hostname、cwd、command line、tracebackを含めません。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell
