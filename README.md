@@ -147,7 +147,7 @@ uv run knowledge-importer approve-repair .\reports\repair-plan.json `
   --all-safe --report-json .\reports\repair-approval.json
 ```
 
-`approve-repair PLAN_JSON`はRepair Plan schema version 1を検証し、`safe=true`かつ`manual-review`ではないactionだけをApproval schema version 1へそのままコピーします。`safe=false`や`manual-review`を承認するescape hatch、個別selector、identity、電子署名はありません。safe actionが0件でも空の有効Approvalを生成します。このHuman Gateは承認記録を作るだけで、repair execution、sidecar生成・削除、Manifest・digest更新、変換、normalizationは実行しません。
+`approve-repair PLAN_JSON`はRepair Plan schema version 1を検証し、`safe=true`かつ`manual-review`ではないactionだけをApproval schema version 1へそのままコピーします。Plan validationでは`regenerate-sidecar`を`missing-sidecar / safe=true`、`remove-stale-sidecar`を`stale-sidecar / safe=true`へ固定し、`regenerate-manifest`、`verify-artifact`、`manual-review`の`safe=true`偽装を拒否します。`safe=false`や`manual-review`を承認するescape hatch、個別selector、identity、電子署名はありません。safe actionが0件でも空の有効Approvalを生成します。このHuman Gateは承認記録を作るだけで、repair execution、sidecar生成・削除、Manifest・digest更新、変換、normalizationは実行しません。
 
 Approvalは入力Repair Plan fileの実bytesをstreaming SHA-256でhashし、lowercase 64桁hexとして保持します。parse後の再serialize結果、path、mtimeはhash材料にしないため、Planが1 byteでも変わるとApprovalとのbindingが失われます。同一Plan bytesと`all-safe` scopeからは同一Approval JSON bytesを生成します。
 

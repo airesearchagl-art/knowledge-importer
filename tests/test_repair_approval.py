@@ -16,6 +16,7 @@ from knowledge_importer.repair_plan import (
     RepairAction,
     RepairActionCategory,
     RepairPlan,
+    parse_repair_plan_bytes,
     write_repair_plan,
 )
 
@@ -45,21 +46,27 @@ def _mixed_actions() -> tuple[RepairAction, ...]:
         ),
         _action(
             "section/b.metadata.json",
+            RepairActionCategory.REMOVE_STALE_SIDECAR,
+            "stale-sidecar",
+            safe=True,
+        ),
+        _action(
+            "section/c.metadata.json",
             RepairActionCategory.REGENERATE_MANIFEST,
             "extra-artifact",
             safe=False,
         ),
         _action(
-            "section/c.metadata.json",
-            RepairActionCategory.MANUAL_REVIEW,
+            "section/d.metadata.json",
+            RepairActionCategory.VERIFY_ARTIFACT,
             "artifact-digest-mismatch",
             safe=False,
         ),
         _action(
-            "section/d.metadata.json",
+            "section/e.metadata.json",
             RepairActionCategory.MANUAL_REVIEW,
             "path-mismatch",
-            safe=True,
+            safe=False,
         ),
     )
 
@@ -71,14 +78,80 @@ def test_all_safe_approval_binds_exact_plan_bytes(tmp_path: Path) -> None:
     approval = build_repair_approval(plan_path)
 
     assert approval.plan_sha256 == hashlib.sha256(plan_bytes).hexdigest()
-    assert approval.approved_actions == (_mixed_actions()[0],)
+    assert approval.approved_actions == _mixed_actions()[:2]
     assert approval.payload() == {
         "report_type": "knowledge-package-repair-approval",
         "schema_version": 1,
         "plan": {"sha256": approval.plan_sha256, "schema_version": 1},
         "scope": {"mode": "all-safe"},
-        "approved_actions": [_mixed_actions()[0].payload()],
+        "approved_actions": [action.payload() for action in _mixed_actions()[:2]],
     }
+
+
+@pytest.mark.parametrize(
+    "tampered_action",
+    [
+        _action(
+            "section/a.metadata.json",
+            RepairActionCategory.REGENERATE_MANIFEST,
+            "extra-artifact",
+            safe=True,
+        ),
+        _action(
+            "section/a.metadata.json",
+            RepairActionCategory.VERIFY_ARTIFACT,
+            "artifact-digest-mismatch",
+            safe=True,
+        ),
+        _action(
+            "section/a.metadata.json",
+            RepairActionCategory.MANUAL_REVIEW,
+            "artifact-digest-mismatch",
+            safe=True,
+        ),
+        _action(
+            "section/a.metadata.json",
+            RepairActionCategory.REGENERATE_SIDECAR,
+            "stale-sidecar",
+            safe=True,
+        ),
+        _action(
+            "section/a.metadata.json",
+            RepairActionCategory.REMOVE_STALE_SIDECAR,
+            "missing-sidecar",
+            safe=True,
+        ),
+    ],
+)
+def test_tampered_safe_semantics_are_rejected_without_approval(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    tampered_action: RepairAction,
+) -> None:
+    plan = tmp_path / "tampered-plan.json"
+    plan_bytes = _write_plan(plan, (tampered_action,))
+    report = tmp_path / "approval.json"
+
+    with pytest.raises(ValueError, match="action semantics"):
+        parse_repair_plan_bytes(plan_bytes)
+    assert (
+        cli.run(
+            [
+                "approve-repair",
+                str(plan),
+                "--all-safe",
+                "--report-json",
+                str(report),
+            ]
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert not report.exists()
+    assert captured.err == "Repair Planを検証できませんでした。\n"
+    assert str(tmp_path) not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_plan_one_byte_change_changes_digest(tmp_path: Path) -> None:

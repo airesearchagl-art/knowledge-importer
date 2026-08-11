@@ -164,12 +164,28 @@ def parse_repair_action(value: object) -> RepairAction:
     )
     if not valid:
         raise ValueError("invalid Repair Plan action")
-    return RepairAction(
+    action = RepairAction(
         path=value["path"],
         action=RepairActionCategory(value["action"]),
         reason_category=value["reason_category"],
         safe=value["safe"],
     )
+    valid_semantics = {
+        RepairActionCategory.REGENERATE_SIDECAR: (
+            action.reason_category == "missing-sidecar" and action.safe
+        ),
+        RepairActionCategory.REMOVE_STALE_SIDECAR: (
+            action.reason_category == "stale-sidecar" and action.safe
+        ),
+        RepairActionCategory.REGENERATE_MANIFEST: (
+            action.reason_category == "extra-artifact" and not action.safe
+        ),
+        RepairActionCategory.VERIFY_ARTIFACT: not action.safe,
+        RepairActionCategory.MANUAL_REVIEW: not action.safe,
+    }
+    if not valid_semantics[action.action]:
+        raise ValueError("invalid Repair Plan action semantics")
+    return action
 
 
 def parse_repair_plan_bytes(content: bytes) -> RepairPlan:

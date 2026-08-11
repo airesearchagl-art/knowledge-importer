@@ -323,7 +323,7 @@ Markdown、Metadata Sidecar、Artifact Manifest、PDF、Batch JSON、CSV、Quali
 
 `plan.sha256`はRepair Plan fileの実bytesだけをstreaming SHA-256へ入力したlowercase 64桁hexです。parse後payloadの再serialize、path、mtime、timestamp、host情報はhash材料に含めません。`plan.schema_version`はbinding対象がRepair Plan v1であることを表します。
 
-v1のscopeは`all-safe`だけです。Repair Planで`safe=true`のactionから`manual-review`を除外し、path、action、reason category、safeを変更・再解釈せず元の順序でコピーします。`safe=false`や`manual-review`の承認、個別action selector、approver identity、username、email、hostname、cwd、command line、timestamp、random ID、電子署名は対象外です。safe actionが0件でも`approved_actions=[]`の有効Approvalになります。
+v1のscopeは`all-safe`だけです。Repair Plan parserは`regenerate-sidecar = missing-sidecar / safe=true`、`remove-stale-sidecar = stale-sidecar / safe=true`、`regenerate-manifest = extra-artifact / safe=false`を必須とし、`verify-artifact`と`manual-review`も常に`safe=false`とします。このsemantic invariantに反するPlanはschema v1として拒否します。承認時は検証済みPlanの`safe=true` actionから`manual-review`を除外し、path、action、reason category、safeを変更・再解釈せず元の順序でコピーします。`safe=false`や`manual-review`の承認、個別action selector、approver identity、username、email、hostname、cwd、command line、timestamp、random ID、電子署名は対象外です。safe actionが0件でも`approved_actions=[]`の有効Approvalになります。
 
 ### Determinism and output protection
 
