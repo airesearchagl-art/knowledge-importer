@@ -407,6 +407,26 @@ def test_other_report_is_not_overwritten_before_validation(tmp_path: Path) -> No
     assert report.read_bytes() == before
 
 
+def test_semantically_invalid_preflight_is_not_overwritten(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest = tmp_path / "manifest.json"
+    plan = tmp_path / "plan.json"
+    approval = tmp_path / "approval.json"
+    report = tmp_path / "preflight.json"
+    _write_manifest(manifest, (item,))
+    _prepare_contract(root, manifest, plan, approval)
+    preflight = build_repair_preflight(
+        root, manifest_path=manifest, plan_path=plan, approval_path=approval
+    ).payload()
+    preflight["actions"][0]["target"]["exists"] = True  # type: ignore[index]
+    report.write_text(json.dumps(preflight, ensure_ascii=False) + "\n", encoding="utf-8")
+    before = report.read_bytes()
+
+    assert cli.run(_args(root, manifest, plan, approval) + ["--report-json", str(report)]) == 2
+    assert report.read_bytes() == before
+
+
 def test_preflight_is_read_only_and_does_not_expose_local_details(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -375,14 +375,16 @@ def parse_repair_preflight_bytes(content: bytes) -> RepairPreflight:
             raise ValueError("invalid Repair Preflight action")
         target_bytes = target.get("bytes")
         target_sha256 = target.get("sha256")
-        target_digest_valid = (
-            target_bytes is None
-            and target_sha256 is None
-            or isinstance(target_bytes, int)
+        target_exists = target["exists"]
+        target_digest_complete = (
+            isinstance(target_bytes, int)
             and not isinstance(target_bytes, bool)
             and target_bytes >= 0
             and isinstance(target_sha256, str)
             and _SHA256.fullmatch(target_sha256) is not None
+        )
+        target_digest_valid = (
+            target_bytes is None and target_sha256 is None or target_digest_complete
         )
         status_valid = (
             status == "ready"
@@ -393,7 +395,22 @@ def parse_repair_preflight_bytes(content: bytes) -> RepairPreflight:
             and bool(block_reason)
             and not state_matches
         )
-        if not target_digest_valid or not status_valid:
+        ready_target_valid = status != "ready" or (
+            category is RepairActionCategory.REGENERATE_SIDECAR
+            and not target_exists
+            and target_bytes is None
+            and target_sha256 is None
+            or category is RepairActionCategory.REMOVE_STALE_SIDECAR
+            and target_exists
+            and target_digest_complete
+        )
+        if (
+            not target_digest_valid
+            or not target_exists
+            and (target_bytes is not None or target_sha256 is not None)
+            or not status_valid
+            or not ready_target_valid
+        ):
             raise ValueError("invalid Repair Preflight action")
         parsed_actions.append(
             PreflightAction(
@@ -402,7 +419,7 @@ def parse_repair_preflight_bytes(content: bytes) -> RepairPreflight:
                 block_reason,
                 state_matches,
                 expected_backup,
-                PreflightTarget(path, target["exists"], target_bytes, target_sha256),
+                PreflightTarget(path, target_exists, target_bytes, target_sha256),
             )
         )
     if (
