@@ -102,6 +102,13 @@ class ManifestRecord:
     output_sha256: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class ManifestState:
+    records: tuple[ManifestRecord, ...]
+    engine: dict[str, str]
+    settings: dict[str, object]
+
+
 def _sort_key(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold()
 
@@ -576,10 +583,16 @@ def _compare_manifest(
 def read_manifest_records(path: Path) -> tuple[ManifestRecord, ...]:
     """Read Artifact Manifest v1 records through the validation parser."""
 
+    return read_manifest_state(path).records
+
+
+def read_manifest_state(path: Path) -> ManifestState:
+    """Read the Manifest v1 records and settings through the validation parser."""
+
     records, engine, settings, issues = _parse_manifest(path)
     if records is None or engine is None or settings is None or issues:
         raise ValueError("invalid Artifact Manifest")
-    return records
+    return ManifestState(records, engine, settings)
 
 
 def validate_package(
