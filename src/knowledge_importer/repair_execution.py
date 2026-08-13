@@ -267,34 +267,63 @@ def _repository_roots(package_root: Path) -> tuple[Path, ...]:
     return tuple(roots)
 
 
-def _prepare_backup_root(package_root: Path, backup_dir: Path | None) -> Path:
-    if backup_dir is None:
-        root = Path(tempfile.mkdtemp(prefix="knowledge-importer-repair-"))
-    else:
-        if backup_dir.is_symlink():
-            raise RepairExecutionInputError("unsafe backup directory")
-        root = backup_dir
-    resolved = root.resolve()
+def _ensure_directory_without_links(path: Path) -> None:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.exists() or current.is_symlink():
+            if _is_link(current) or not current.is_dir():
+                raise OSError("unsafe backup directory")
+        else:
+            current.mkdir()
+            if _is_link(current) or not current.is_dir():
+                raise OSError("unsafe backup directory")
+
+
+def _prepare_backup_session(package_root: Path, backup_dir: Path | None) -> Path:
+    root = backup_dir if backup_dir is not None else Path(tempfile.gettempdir())
+    resolved = root.resolve(strict=False)
     forbidden = (package_root.resolve(), *_repository_roots(package_root))
     if any(resolved == item or resolved.is_relative_to(item) for item in forbidden):
-        if backup_dir is None:
-            with suppress(OSError):
-                root.rmdir()
-        raise RepairExecutionInputError("backup directory must be outside package and repository")
-    if backup_dir is not None:
-        backup_dir.mkdir(parents=True, exist_ok=True)
-    return root
+        raise OSError("backup directory must be outside package and repository")
+    _ensure_directory_without_links(root)
+    session = Path(tempfile.mkdtemp(prefix="knowledge-importer-repair-", dir=root))
+    if _is_link(session) or session.parent.resolve() != root.resolve():
+        raise OSError("unsafe backup session")
+    return session
 
 
-def _backup_target(target: Path, backup_path: Path) -> ArtifactDigest:
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(target, backup_path)
+def _backup_target(target: Path, backup_path: Path, session_root: Path) -> ArtifactDigest:
+    session_resolved = session_root.resolve()
+    if _is_link(session_root) or not session_root.is_dir():
+        raise OSError("unsafe backup session")
+    current = session_root
+    relative_parent = backup_path.parent.relative_to(session_root)
+    for part in relative_parent.parts:
+        current /= part
+        current.mkdir()
+        if _is_link(current) or not current.is_dir():
+            raise OSError("unsafe backup directory")
+    if backup_path.exists() or backup_path.is_symlink():
+        raise FileExistsError
+    if not backup_path.parent.resolve().is_relative_to(session_resolved):
+        raise OSError("backup path escaped session")
+
     source_digest = digest_file(target)
-    backup_digest = digest_file(backup_path)
-    if backup_digest != source_digest:
-        with suppress(OSError):
-            backup_path.unlink(missing_ok=True)
-        raise OSError("backup verification failed")
+    try:
+        with target.open("rb") as source, backup_path.open("xb") as destination:
+            shutil.copyfileobj(source, destination)
+        if _is_link(backup_path) or not backup_path.resolve().is_relative_to(session_resolved):
+            raise OSError("unsafe backup file")
+        backup_digest = digest_file(backup_path)
+        if backup_digest != source_digest:
+            raise OSError("backup verification failed")
+    except Exception:
+        if backup_path.is_file() and not _is_link(backup_path):
+            with suppress(OSError):
+                backup_path.unlink()
+        raise
     return backup_digest
 
 
@@ -446,7 +475,24 @@ def execute_repair(
         action.repair_action.action is RepairActionCategory.REMOVE_STALE_SIDECAR
         for action in inputs.preflight.actions
     )
-    backup_root = _prepare_backup_root(package_root, backup_dir) if needs_backup else None
+    backup_root: Path | None = None
+    if needs_backup:
+        try:
+            backup_root = _prepare_backup_session(package_root, backup_dir)
+        except Exception:  # noqa: BLE001 - unsafe/colliding destination is action failure.
+            first_stale = next(
+                index
+                for index, action in enumerate(inputs.preflight.actions)
+                if action.repair_action.action is RepairActionCategory.REMOVE_STALE_SIDECAR
+            )
+            results[first_stale].status = "failed"
+            return RepairExecutionReport(
+                inputs.plan_sha256,
+                inputs.approval_sha256,
+                inputs.preflight_sha256,
+                tuple(results),
+                "not-run",
+            )
     applied: list[_AppliedAction] = []
     for index, submitted in enumerate(inputs.preflight.actions):
         try:
@@ -499,7 +545,7 @@ def execute_repair(
             else:
                 assert backup_root is not None
                 backup_path = backup_root / f"{index:04d}" / f"{action.path}.bak"
-                backup_digest = _backup_target(target, backup_path)
+                backup_digest = _backup_target(target, backup_path, backup_root)
                 if backup_digest.sha256 != submitted.target.sha256:
                     raise OSError("backup no longer matches preflight")
                 try:

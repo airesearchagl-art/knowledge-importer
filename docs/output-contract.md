@@ -438,7 +438,7 @@ Execution開始時と各action直前に現在Preflightを再構築します。`r
 
 ### Backup, rollback, and fail-fast
 
-backup rootはpackage rootと検出可能なGit repositoryの外だけを許可します。`--backup-dir`未指定時はsystem temporary root配下へ作成し、Execution Reportへabsolute backup pathを記録しません。stale sidecarはbackup bytes・digestを確認してから削除します。
+backup rootはpackage rootと検出可能なGit repositoryの外だけを許可します。各Executionはbackup root直下に新規専用session directoryを排他的に作成し、その配下でも新規directory・fileだけを作成します。既存regular fileとの衝突、final pathのsymlink、途中directoryのsymlink・junctionは追跡・上書きせずaction failureとしてfail-fastします。`--backup-dir`未指定時はsystem temporary rootを使い、Execution Reportへabsolute backup pathを記録しません。stale sidecarはsourceとbackupのbytes・digestを確認してから削除します。
 
 v1は決定的な順序で逐次実行し、最初の失敗で停止して後続actionを`not-run`にします。生成sidecarのrollbackは実行時digestと現在digestが一致する場合だけ削除します。削除sidecarのrollbackはtargetが空の場合だけbackupからatomic復元します。外部変更との競合時は上書きせず`rollback-failed`とします。
 

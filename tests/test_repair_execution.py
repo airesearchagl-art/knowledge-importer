@@ -284,7 +284,7 @@ def test_backup_failure_does_not_delete_target(
     before = sidecar.read_bytes()
     manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(succeeded),))
 
-    def fail_backup(target: Path, backup: Path) -> ArtifactDigest:
+    def fail_backup(target: Path, backup: Path, session_root: Path) -> ArtifactDigest:
         raise OSError("synthetic backup failure")
 
     monkeypatch.setattr(execution, "_backup_target", fail_backup)
@@ -298,6 +298,127 @@ def test_backup_failure_does_not_delete_target(
 
     assert report.exit_code == 1
     assert sidecar.read_bytes() == before
+
+
+def test_existing_backup_file_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    succeeded = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    sidecar = _sidecar(root, succeeded)
+    target_before = sidecar.read_bytes()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(succeeded),))
+    session = tmp_path / "malicious-session"
+    backup = session / "0000" / "section" / "a.metadata.json.bak"
+    backup.parent.mkdir(parents=True)
+    backup.write_bytes(b"existing backup")
+    monkeypatch.setattr(execution, "_prepare_backup_session", lambda package, root: session)
+
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+
+    assert report.exit_code == 1
+    assert sidecar.read_bytes() == target_before
+    assert backup.read_bytes() == b"existing backup"
+
+
+def test_backup_final_symlink_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    succeeded = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    sidecar = _sidecar(root, succeeded)
+    target_before = sidecar.read_bytes()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(succeeded),))
+    session = tmp_path / "malicious-session"
+    backup = session / "0000" / "section" / "a.metadata.json.bak"
+    backup.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-backup.bin"
+    outside.write_bytes(b"outside unchanged")
+    try:
+        backup.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+    monkeypatch.setattr(execution, "_prepare_backup_session", lambda package, root: session)
+
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+
+    assert report.exit_code == 1
+    assert sidecar.read_bytes() == target_before
+    assert outside.read_bytes() == b"outside unchanged"
+
+
+def test_backup_intermediate_link_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    succeeded = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    sidecar = _sidecar(root, succeeded)
+    target_before = sidecar.read_bytes()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(succeeded),))
+    session = tmp_path / "malicious-session"
+    session.mkdir()
+    outside = tmp_path / "outside-directory"
+    outside.mkdir()
+    linked = session / "0000"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is not permitted")
+    monkeypatch.setattr(execution, "_prepare_backup_session", lambda package, root: session)
+
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+
+    assert report.exit_code == 1
+    assert sidecar.read_bytes() == target_before
+    assert tuple(outside.iterdir()) == ()
+
+
+def test_explicit_backup_root_uses_new_session_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    succeeded = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    _sidecar(root, succeeded)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(succeeded),))
+    backup_root = tmp_path / "backup-root"
+    preexisting = backup_root / "unrelated.bin"
+    preexisting.parent.mkdir()
+    preexisting.write_bytes(b"preserve")
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
+
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+        backup_dir=backup_root,
+    )
+
+    sessions = tuple(backup_root.glob("knowledge-importer-repair-*"))
+    assert report.exit_code == 0
+    assert preexisting.read_bytes() == b"preserve"
+    assert len(sessions) == 1
+    assert sessions[0].is_dir()
+    assert len(tuple(sessions[0].rglob("*.bak"))) == 1
 
 
 def test_delete_failure_keeps_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
