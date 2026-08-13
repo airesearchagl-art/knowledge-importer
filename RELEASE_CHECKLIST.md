@@ -2,6 +2,8 @@
 
 判定: **条件付きGitHubソース公開継続可**
 
+再評価日: 2026-08-14（base `031cd4ec9987f13b49b41f9859cc235162817aaf`）
+
 この文書は、既にpublicであるGitHub repositoryのソース公開状態を安全に継続するため、人が確認する項目をまとめたものです。repositoryをこれからpublicへ切り替えることを前提としません。ライセンスや法的適合性を判断する文書ではありません。GitHub Release、wheel / sdist配布、PyPI公開、model artifact再配布は別のHuman Gateが必要で、今回の対象外です。
 
 ## 公開範囲
@@ -25,6 +27,23 @@
 - tracked filesと配布物のsecret、実メール、local identity、実PDF、巨大ファイル検査: 検出0件
 - wheel / sdistへのtests、scripts、生成出力、cache、`.env`混入: 検出0件
 - 外部API、外部MCP、モデルdownload: 未使用
+
+## v0.1.0配布範囲別判定
+
+この表の「条件付き可」は、技術検証済みでも公開操作前のHuman Gateが残ることを示します。tag、Release、upload、model再配布をこの再評価では実行していません。
+
+| Scope | 判定 | Blocker / Condition |
+|---|---|---|
+| GitHub source repository | 可 | MIT project sourceのみを継続公開し、dependency wheel・model artifactを同梱しない |
+| Git tag `v0.1.0` | 条件付き可 | versionとrelease notesは整合。作成直前に最終diffと対象commitを人が確認する |
+| Source-only GitHub Release | 条件付き可 | Release本文と自動source archiveだけに限定し、assetを添付しない。公開直前Human Gateが必要 |
+| GitHub自動source archive | 可 | tracked sourceと同じ範囲で、dependency wheel・model artifactを含まないことを維持する |
+| GitHub Release + wheel / sdist | 不可 | package artifactの公開配布Human Gateと最終内容確認が未完了 |
+| PyPI | 不可 | wheel / sdist公開判断に加え、PyPI metadata・description・project URLの確認が未完了 |
+| Dependency込みbinary / installer | 不可 | platform別native library、third-party license・NOTICE監査が未完了 |
+| Model artifact再配布 | 不可 | fixed revisionへ適用される原文license・NOTICE・attribution・再配布条件の確認が未完了 |
+
+「可」は当該scopeの技術・記録上の判定であり、今回その公開操作を実行したことを意味しません。「不可」のscopeは対応Human Gateが完了するまで公開しません。
 
 ## 未完了のHuman Gate
 
@@ -77,7 +96,12 @@ real Docling smoke、TableFormer比較、成功Markdownの基礎品質評価は�
 - 安全なerror classificationと部分失敗後の継続
 - Batch JSON schema version 1とCSV report
 - opt-in quality warningsと独立Quality JSON schema version 1
+- 決定的なArtifact Manifest、Metadata Sidecar、Markdown normalization
+- Knowledge Package read-only validationとstrict validation
+- `Validate → Plan → Approve → Preflight → Execute`のsafe repair lifecycle
+- TOCTOU再検証、fail-fast、backup、rollback、no-clobber mutation
 - 決定的な合成fixture品質テスト
+- 合成fixtureによるend-to-end Knowledge Package lifecycle smoke
 - wheel / sdist buildとclean-install smoke test
 
 ### Known limitations
