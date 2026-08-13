@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
@@ -18,8 +20,8 @@ from knowledge_importer.artifact_manifest import (
 )
 from knowledge_importer.document_metadata import (
     DocumentMetadataSettings,
+    DocumentMetadataSidecar,
     build_document_metadata,
-    write_document_metadata,
 )
 from knowledge_importer.json_writer import write_json_atomically
 from knowledge_importer.package_validation import (
@@ -123,6 +125,7 @@ class _AppliedAction:
     target_path: Path
     applied_digest: ArtifactDigest | None
     backup_path: Path | None
+    backup_digest: ArtifactDigest | None
 
 
 def _sha256(content: bytes) -> str:
@@ -331,9 +334,11 @@ def _delete_target(target: Path) -> None:
     target.unlink()
 
 
-def _write_bytes_atomically(path: Path, content: bytes) -> None:
+def _write_new_bytes_no_clobber(path: Path, content: bytes) -> None:
     temporary: Path | None = None
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or _is_link(path):
+        raise FileExistsError
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
@@ -344,19 +349,45 @@ def _write_bytes_atomically(path: Path, content: bytes) -> None:
         ) as output:
             temporary = Path(output.name)
             output.write(content)
-        temporary.replace(path)
-    except Exception:
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+    finally:
         if temporary is not None:
             with suppress(OSError):
                 temporary.unlink(missing_ok=True)
-        raise
 
 
-def _restore_backup(target: Path, backup_path: Path) -> None:
+def _read_verified_backup(backup_path: Path, expected_digest: ArtifactDigest) -> bytes:
+    if _is_link(backup_path):
+        raise OSError("unsafe backup file")
+    before = backup_path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError("unsafe backup file")
+    with backup_path.open("rb") as source:
+        opened = os.fstat(source.fileno())
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("backup changed")
+        content = source.read()
+    after = backup_path.lstat()
+    if _is_link(backup_path) or not stat.S_ISREG(after.st_mode):
+        raise OSError("unsafe backup file")
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        raise OSError("backup changed")
+    actual_digest = ArtifactDigest(len(content), hashlib.sha256(content).hexdigest())
+    if actual_digest != expected_digest:
+        raise OSError("backup verification failed")
+    return content
+
+
+def _restore_backup(
+    target: Path, backup_path: Path, expected_backup_digest: ArtifactDigest
+) -> None:
     if target.exists() or _is_link(target):
         raise FileExistsError
-    _write_bytes_atomically(target, backup_path.read_bytes())
-    if digest_file(target) != digest_file(backup_path):
+    content = _read_verified_backup(backup_path, expected_backup_digest)
+    _write_new_bytes_no_clobber(target, content)
+    if digest_file(target) != expected_backup_digest:
         raise OSError("rollback verification failed")
 
 
@@ -366,7 +397,7 @@ def _remove_generated(target: Path, expected: ArtifactDigest) -> None:
     target.unlink()
 
 
-def _sidecar_for_record(record: ManifestRecord, manifest: ManifestState) -> object:
+def _sidecar_for_record(record: ManifestRecord, manifest: ManifestState) -> DocumentMetadataSidecar:
     item = ArtifactManifestItem(
         record.input_path,
         record.output_path,
@@ -382,6 +413,11 @@ def _sidecar_for_record(record: ManifestRecord, manifest: ManifestState) -> obje
     return build_document_metadata(item, settings)
 
 
+def _write_new_sidecar(path: Path, sidecar: DocumentMetadataSidecar) -> None:
+    content = (json.dumps(sidecar.payload(), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    _write_new_bytes_no_clobber(path, content)
+
+
 def _rollback(applied: list[_AppliedAction]) -> bool:
     all_succeeded = True
     for item in reversed(applied):
@@ -391,7 +427,8 @@ def _rollback(applied: list[_AppliedAction]) -> bool:
                 _remove_generated(item.target_path, item.applied_digest)
             else:
                 assert item.backup_path is not None
-                _restore_backup(item.target_path, item.backup_path)
+                assert item.backup_digest is not None
+                _restore_backup(item.target_path, item.backup_path, item.backup_digest)
         except Exception:  # noqa: BLE001 - rollback state is represented safely in report.
             item.result.status = "rollback-failed"
             item.result.rollback = "failed"
@@ -539,9 +576,9 @@ def execute_repair(
         results[index].before = _target_state(target, action.path)
         try:
             if action.action is RepairActionCategory.REGENERATE_SIDECAR:
-                write_document_metadata(target, _sidecar_for_record(record, inputs.manifest))
+                _write_new_sidecar(target, _sidecar_for_record(record, inputs.manifest))
                 applied_digest = digest_file(target)
-                applied.append(_AppliedAction(results[index], target, applied_digest, None))
+                applied.append(_AppliedAction(results[index], target, applied_digest, None, None))
             else:
                 assert backup_root is not None
                 backup_path = backup_root / f"{index:04d}" / f"{action.path}.bak"
@@ -552,11 +589,15 @@ def execute_repair(
                     _delete_target(target)
                 except Exception:
                     if not target.exists():
-                        applied.append(_AppliedAction(results[index], target, None, backup_path))
+                        applied.append(
+                            _AppliedAction(results[index], target, None, backup_path, backup_digest)
+                        )
                     raise
                 if target.exists():
                     raise OSError("target deletion failed")
-                applied.append(_AppliedAction(results[index], target, None, backup_path))
+                applied.append(
+                    _AppliedAction(results[index], target, None, backup_path, backup_digest)
+                )
         except Exception:  # noqa: BLE001 - safe report status replaces local exception details.
             results[index].status = "failed"
             _rollback(applied)

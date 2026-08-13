@@ -450,7 +450,7 @@ def test_regenerated_sidecar_rolls_back_and_later_action_is_not_run(
     first = _item(root, "a/first.md", status=ManifestStatus.SUCCEEDED)
     second = _item(root, "z/second.md", status=ManifestStatus.SUCCEEDED)
     manifest, plan, approval, preflight = _contract(tmp_path, root, (second, first))
-    original_writer = execution.write_document_metadata
+    original_writer = execution._write_new_sidecar
     calls = 0
 
     def fail_second(path: Path, sidecar: object) -> None:
@@ -460,7 +460,7 @@ def test_regenerated_sidecar_rolls_back_and_later_action_is_not_run(
             raise OSError("synthetic write failure")
         original_writer(path, sidecar)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(execution, "write_document_metadata", fail_second)
+    monkeypatch.setattr(execution, "_write_new_sidecar", fail_second)
     report = execution.execute_repair(
         root,
         manifest_path=manifest,
@@ -475,6 +475,34 @@ def test_regenerated_sidecar_rolls_back_and_later_action_is_not_run(
     assert [action.status for action in report.actions] == ["rolled-back", "failed"]
 
 
+def test_regenerate_sidecar_does_not_clobber_target_created_at_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    target = root / "section" / "a.metadata.json"
+    external = b"external sidecar\n"
+    original_link = execution.os.link
+
+    def create_target_then_link(source: Path, destination: Path, **kwargs: object) -> None:
+        Path(destination).write_bytes(external)
+        original_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(execution.os, "link", create_target_then_link)
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+
+    assert report.exit_code == 1
+    assert target.read_bytes() == external
+    assert report.actions[0].status == "failed"
+
+
 def test_fail_fast_marks_following_action_not_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -484,7 +512,7 @@ def test_fail_fast_marks_following_action_not_run(
         for name in ("a", "m", "z")
     )
     manifest, plan, approval, preflight = _contract(tmp_path, root, items)
-    original_writer = execution.write_document_metadata
+    original_writer = execution._write_new_sidecar
     calls = 0
 
     def fail_second(path: Path, sidecar: object) -> None:
@@ -494,7 +522,7 @@ def test_fail_fast_marks_following_action_not_run(
             raise OSError
         original_writer(path, sidecar)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(execution, "write_document_metadata", fail_second)
+    monkeypatch.setattr(execution, "_write_new_sidecar", fail_second)
     report = execution.execute_repair(
         root,
         manifest_path=manifest,
@@ -524,7 +552,7 @@ def test_removed_stale_sidecar_is_restored_when_later_action_fails(
     )
     monkeypatch.setattr(
         execution,
-        "write_document_metadata",
+        "_write_new_sidecar",
         lambda path, sidecar: (_ for _ in ()).throw(OSError()),
     )
 
@@ -556,7 +584,7 @@ def test_rollback_does_not_overwrite_external_target(
         stale.write_text("external\n", encoding="utf-8")
         raise OSError
 
-    monkeypatch.setattr(execution, "write_document_metadata", conflict_then_fail)
+    monkeypatch.setattr(execution, "_write_new_sidecar", conflict_then_fail)
     report = execution.execute_repair(
         root,
         manifest_path=manifest,
@@ -567,6 +595,136 @@ def test_rollback_does_not_overwrite_external_target(
 
     assert report.exit_code == 1
     assert stale.read_text(encoding="utf-8") == "external\n"
+    assert report.actions[0].status == "rollback-failed"
+
+
+def test_rollback_restore_does_not_clobber_target_created_at_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    stale_source = _item(root, "a/stale.md", status=ManifestStatus.SUCCEEDED)
+    stale = _sidecar(root, stale_source)
+    missing = _item(root, "z/missing.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(
+        tmp_path, root, (_failed(stale_source), missing)
+    )
+    external = b"external rollback target\n"
+    original_link = execution.os.link
+
+    def create_target_then_link(source: Path, destination: Path, **kwargs: object) -> None:
+        if Path(destination) == stale:
+            stale.write_bytes(external)
+        original_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(execution.os, "link", create_target_then_link)
+    monkeypatch.setattr(
+        execution,
+        "_write_new_sidecar",
+        lambda path, sidecar: (_ for _ in ()).throw(OSError()),
+    )
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+
+    assert report.exit_code == 1
+    assert stale.read_bytes() == external
+    assert report.actions[0].status == "rollback-failed"
+
+
+def test_rollback_rejects_modified_backup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "package"
+    stale_source = _item(root, "a/stale.md", status=ManifestStatus.SUCCEEDED)
+    stale = _sidecar(root, stale_source)
+    missing = _item(root, "z/missing.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(
+        tmp_path, root, (_failed(stale_source), missing)
+    )
+    captured: dict[str, Path] = {}
+    original_backup = execution._backup_target
+    original_delete = execution._delete_target
+
+    def capture_backup(target: Path, backup: Path, session: Path) -> ArtifactDigest:
+        digest = original_backup(target, backup, session)
+        captured["path"] = backup
+        return digest
+
+    def delete_then_modify_backup(target: Path) -> None:
+        original_delete(target)
+        captured["path"].write_bytes(b"tampered backup\n")
+
+    monkeypatch.setattr(execution, "_backup_target", capture_backup)
+    monkeypatch.setattr(execution, "_delete_target", delete_then_modify_backup)
+    monkeypatch.setattr(
+        execution,
+        "_write_new_sidecar",
+        lambda path, sidecar: (_ for _ in ()).throw(OSError()),
+    )
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+
+    assert report.exit_code == 1
+    assert not stale.exists()
+    assert report.actions[0].status == "rollback-failed"
+
+
+def test_rollback_rejects_backup_replaced_by_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    stale_source = _item(root, "a/stale.md", status=ManifestStatus.SUCCEEDED)
+    stale = _sidecar(root, stale_source)
+    missing = _item(root, "z/missing.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(
+        tmp_path, root, (_failed(stale_source), missing)
+    )
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside remains unchanged\n")
+    outside_before = outside.read_bytes()
+    captured: dict[str, Path] = {}
+    original_backup = execution._backup_target
+    original_delete = execution._delete_target
+
+    def capture_backup(target: Path, backup: Path, session: Path) -> ArtifactDigest:
+        digest = original_backup(target, backup, session)
+        captured["path"] = backup
+        return digest
+
+    def delete_then_replace_backup(target: Path) -> None:
+        original_delete(target)
+        backup = captured["path"]
+        backup.unlink()
+        try:
+            backup.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlink creation is not permitted")
+
+    monkeypatch.setattr(execution, "_backup_target", capture_backup)
+    monkeypatch.setattr(execution, "_delete_target", delete_then_replace_backup)
+    monkeypatch.setattr(
+        execution,
+        "_write_new_sidecar",
+        lambda path, sidecar: (_ for _ in ()).throw(OSError()),
+    )
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+
+    assert report.exit_code == 1
+    assert not stale.exists()
+    assert outside.read_bytes() == outside_before
     assert report.actions[0].status == "rollback-failed"
 
 
