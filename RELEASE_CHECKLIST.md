@@ -18,6 +18,7 @@
 - wheel / sdist build: 成功
 - wheel本体のoffline install、CLI help、package import: 成功
 - unit / integration / release-readiness tests: 成功
+- 合成fixtureによるKnowledge Package全lifecycle smoke: 成功
 - fake converterによるBatch JSON、CSV、Quality JSON統合smoke: 成功
 - fixed revisionのlocal artifactsを使うproduction Docling smoke: 成功
 - 通常モード4件、TableFormerモード2件、offline再実行: 成功

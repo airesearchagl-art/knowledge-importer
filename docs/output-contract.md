@@ -391,7 +391,7 @@ actionはNFC・case-insensitive path、action、reason categoryの順で固定�
 
 このschemaはexecution permissionではなく、read-onlyな時点証明です。将来Executionは実行直前にPlan、Approval、Preflight target digestとpackage状態を再検証し、v1では`regenerate-sidecar`と`remove-stale-sidecar`だけを対象にします。
 
-- `regenerate-sidecar`: 新規fileなのでbackup不要。same-directory temporary fileからatomic replaceし、失敗時はfileなし状態を維持する
+- `regenerate-sidecar`: 新規fileなのでbackup不要。same-directory temporary fileをno-clobberで公開し、action直前または公開時にtargetが存在すれば外部fileを上書きせず失敗する
 - `remove-stale-sidecar`: 直接`unlink`せず、削除前にpackage外または専用temporary/backup領域へ退避し、元bytesへrollback可能にする。machine-readable reportへbackupのabsolute pathを記録しない
 - partial failure: deterministic orderで逐次実行し、最初の失敗で停止するfail-fastを採用する。可能な範囲をrollbackし、事前Planからずれた状態で後続actionを継続しない
 
@@ -440,7 +440,7 @@ Execution開始時と各action直前に現在Preflightを再構築します。`r
 
 backup rootはpackage rootと検出可能なGit repositoryの外だけを許可します。各Executionはbackup root直下に新規専用session directoryを排他的に作成し、その配下でも新規directory・fileだけを作成します。既存regular fileとの衝突、final pathのsymlink、途中directoryのsymlink・junctionは追跡・上書きせずaction failureとしてfail-fastします。`--backup-dir`未指定時はsystem temporary rootを使い、Execution Reportへabsolute backup pathを記録しません。stale sidecarはsourceとbackupのbytes・digestを確認してから削除します。
 
-v1は決定的な順序で逐次実行し、最初の失敗で停止して後続actionを`not-run`にします。生成sidecarのrollbackは実行時digestと現在digestが一致する場合だけ削除します。削除sidecarのrollbackはtargetが空の場合だけbackupからatomic復元します。外部変更との競合時は上書きせず`rollback-failed`とします。
+v1は決定的な順序で逐次実行し、最初の失敗で停止して後続actionを`not-run`にします。生成sidecarのrollbackは実行時digestと現在digestが一致する場合だけ削除します。削除sidecarのrollbackはtargetが空で、backupが作成時digestと一致する通常fileの場合だけno-clobberで復元します。backupの改変・link差替えや外部targetとの競合時は上書きせず`rollback-failed`とします。
 
 action statusは`succeeded`、`failed-precondition`、`failed`、`rolled-back`、`rollback-failed`、`not-run`、rollback statusは`not-required`、`available`、`completed`、`failed`です。終了コードは完全成功または0 actionが`0`、TOCTOU・mutation・post-validation・rollback関連失敗が`1`、input・schema・binding・output protection・report write errorが`2`です。
 

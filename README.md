@@ -391,7 +391,7 @@ uv run ruff format --check .
 uv build
 ```
 
-`tests/test_release_readiness.py`は合成fixtureとfake converterだけを使い、wheel/sdist、clean venvへのwheel本体install、CLI help、JSON・CSV・品質JSONの統合出力を検証します。実Docling推論やモデルdownloadは実行せず、実PDFの変換品質や完全オフライン変換を保証するテストではありません。
+`tests/test_release_readiness.py`は合成fixtureとfake converterだけを使い、wheel/sdist、clean venvへのwheel本体install、CLI help、JSON・CSV・品質JSONの統合出力を検証します。`tests/test_lifecycle_smoke.py`は同じく外部通信を行わず、`convert → validate → repair-plan → approve-repair → repair-preflight → repair-execute`を一連で検証します。missing/stale sidecar、unsafe issue、TOCTOU、rollback、Execution Report書込み失敗、決定的artifactを対象にします。実Docling推論やモデルdownloadは実行せず、実PDFの変換品質や完全オフライン変換を保証するテストではありません。
 
 ## Offline / Known limitations
 
