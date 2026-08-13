@@ -409,3 +409,5 @@ Knowledge Importer本体は [MIT License](LICENSE) です。third-party dependen
 Doclingのmodel artifactはこのrepositoryに含まれず、同梱・再配布もしません。modelを取得・利用する方は、対象modelごとのlicenseと利用条件を確認してください。公開状態の継続に関する技術的・人手確認は [v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md) と [Third-party License Metadata Review](THIRD_PARTY_LICENSES_REVIEW.md) を参照してください。
 
 現在の公開範囲はGitHub上のproject sourceだけです。GitHub Release、wheel / sdist、PyPI、依存packageを含むbinary、model artifactの配布は、このソース公開判断には含まれず、それぞれの原文license・NOTICE・再配布条件を確認する別のHuman Gateが必要です。
+
+v0.1.0の配布範囲別判定（Git tag、source-only GitHub Release、wheel / sdist、PyPI、binary / installer、model再配布）は [v0.1.0 Public Release Gate](RELEASE_CHECKLIST.md) に整理しています。技術的なbuild成功は公開許可を意味せず、tag・Release・uploadはいずれも公開直前のHuman Gateを必要とします。

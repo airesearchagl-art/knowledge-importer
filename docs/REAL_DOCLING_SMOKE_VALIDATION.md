@@ -2,6 +2,8 @@
 
 実施日: 2026-08-09
 
+再確認: 2026-08-14、base `031cd4ec9987f13b49b41f9859cc235162817aaf`で、テキスト層を持つ架空PDF 1件を固定Heron revisionのlocal artifactsとoffline環境変数下で再変換しました。`convert`とstrict `validate`はいずれもexit code `0`で、Markdown非空、期待本文、Metadata Sidecar、Manifestの成功itemを確認しました。model download、external API、token利用、cache変更は行っていません。Popplerが未導入のため、この再確認分のPNG目視検査は未実施です。2026-08-09の9ページ画像レンダリング結果は変更していません。
+
 この文書は、modelをrepositoryへ含めず、cache済みfixed revisionをDoclingの正式なlocal artifacts経路から利用したmanual validationの結果です。実資料、外部API、model download、network fallbackは使用していません。
 
 ## 判定
