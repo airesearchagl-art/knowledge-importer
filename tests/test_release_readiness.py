@@ -36,6 +36,7 @@ EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/__main__.py",
     "knowledge_importer/artifact_manifest.py",
     "knowledge_importer/backup_cleanup_approval.py",
+    "knowledge_importer/backup_cleanup_execution.py",
     "knowledge_importer/backup_cleanup_plan.py",
     "knowledge_importer/backup_inventory.py",
     "knowledge_importer/cli.py",
@@ -172,6 +173,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     backup_inventory_help = _run_command([str(cli), "backup-inventory", "--help"])
     backup_cleanup_plan_help = _run_command([str(cli), "backup-cleanup-plan", "--help"])
     backup_cleanup_approval_help = _run_command([str(cli), "approve-backup-cleanup", "--help"])
+    backup_cleanup_execute_help = _run_command([str(cli), "backup-cleanup-execute", "--help"])
     module_help = _run_command([str(python), "-m", "knowledge_importer", "--help"])
     for option in EXPECTED_OPTIONS:
         assert option in cli_help
@@ -184,6 +186,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "backup-inventory" in module_help
     assert "backup-cleanup-plan" in module_help
     assert "approve-backup-cleanup" in module_help
+    assert "backup-cleanup-execute" in module_help
     for option in ("--manifest", "--report-json", "--strict"):
         assert option in validate_help
         assert option in repair_plan_help
@@ -206,6 +209,14 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
         assert option in backup_cleanup_plan_help
     for option in ("--backup-root", "--all-planned", "--report-json"):
         assert option in backup_cleanup_approval_help
+    for option in (
+        "--package-root",
+        "--inventory",
+        "--plan",
+        "--approval",
+        "--report-json",
+    ):
+        assert option in backup_cleanup_execute_help
     metadata = _run_command(
         [
             str(python),
@@ -214,6 +225,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
                 "from importlib.metadata import version; "
                 "import knowledge_importer.artifact_manifest, knowledge_importer.cli, "
                 "knowledge_importer.backup_cleanup_approval, "
+                "knowledge_importer.backup_cleanup_execution, "
                 "knowledge_importer.backup_cleanup_plan, "
                 "knowledge_importer.backup_inventory, "
                 "knowledge_importer.json_writer, "

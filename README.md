@@ -203,11 +203,11 @@ managed session treeに置けるものは`session-manifest.json`、Manifestで�
 
 `backup-inventory BACKUP_ROOT`は`--package-root`を必須とするread-only検査です。backup root自身と全path componentでsymlink／junction／reparse pointを追跡せず、package rootまたは検出可能なGit repositoryと重なるbackup rootを拒否します。分類は`managed`、`missing-session-manifest`、`invalid-session-manifest`、`interrupted-open-session`、`unexpected-entry`、`binding-unverifiable`、`legacy-unmanaged`です。backup root直下の既知session prefixに一致しないfile、directory、symlink、junction／reparse point、その他のentryも無視せず`unexpected-entry`として報告し、その内容をcleanup候補として解釈しません。v0.1.0で作成済みの従来sessionは変更・移行せず`legacy-unmanaged`として検出します。
 
-将来のcleanup planning候補を示す`planning_eligible`は、構造とdigestが有効な`complete` sessionだけが`true`です。`open`、`rolled-back`、`rollback-failed`、invalid／orphan／legacy／unexpected entryは保守的に`false`です。これは削除許可ではありません。v1のbinding検査はsession manifest内に記録されたbinding metadataのschema妥当性を確認するもので、元のManifest・Plan・Approval・Preflight実bytesとの再照合ではありません。`--report-json`はbackup root外だけに出力でき、有効なBackup Inventory v1自身だけatomic更新できます。cleanup plan、approval、cleanup execution、自動削除、age／size／generation retention policyはこのversionにはありません。
+cleanup planning候補を示す`planning_eligible`は、構造とdigestが有効な`complete` sessionだけが`true`です。`open`、`rolled-back`、`rollback-failed`、invalid／orphan／legacy／unexpected entryは保守的に`false`です。これは単独では削除許可になりません。v1のbinding検査はsession manifest内に記録されたbinding metadataのschema妥当性を確認するもので、元のManifest・Plan・Approval・Preflight実bytesとの再照合ではありません。`--report-json`はbackup root外だけに出力でき、有効なBackup Inventory v1自身だけatomic更新できます。age／size／generationによる自動retentionや自動削除は実装していません。
 
 終了コードは全sessionが健全な`managed`（`complete`または`rolled-back`）なら`0`、interrupted、rollback failure、invalid、orphan、legacy-unmanagedを1件以上検出した場合は`1`、CLI input・unsafe root・report path・report書込みerrorは`2`です。
 
-### Backup Cleanup Plan / Approval v1（dry-run）
+### Backup Cleanup Plan / Approval / Execution v1
 
 Backup Inventory v1から削除候補を明示選択する場合は、`backup-cleanup-plan`へsessionを1件ずつ指定します。指定順ではなくNFC正規化・casefoldによるcanonical順で出力し、同一sessionの重複指定を拒否します。`--backup-root`はInventoryが保持しないfilesystem境界を明示し、Inventory、Plan、Approvalの入力・出力がbackup rootや対象session配下へ置かれることを防ぎます。backup root自身が検出可能なGit repository内にある場合も拒否します。
 
@@ -221,11 +221,24 @@ uv run knowledge-importer approve-backup-cleanup .\reports\backup-cleanup-plan.j
   --backup-root D:\safe-backups\knowledge-importer `
   --all-planned `
   --report-json .\reports\backup-cleanup-approval.json
+
+uv run knowledge-importer backup-cleanup-execute D:\safe-backups\knowledge-importer `
+  --package-root .\output `
+  --inventory .\reports\backup-inventory.json `
+  --plan .\reports\backup-cleanup-plan.json `
+  --approval .\reports\backup-cleanup-approval.json `
+  --report-json .\reports\backup-cleanup-audit.json
 ```
 
 Cleanup Plan schema version 1は入力Inventory fileの実bytes SHA-256へbindingし、`policy.mode=explicit-sessions`、`action=delete-backup-session`、`reason_category=explicit-retention-release`を固定します。Inventory上で`managed / complete / planning_eligible=true`のsessionだけが`eligible=true`です。unknown、legacy、open、rollback-failed、invalid、unexpectedその他はblocked actionとしてPlanに残りますが、Approvalへは入りません。blockedを含むPlanや承認action 0件のApprovalも正常なdry-run出力で、終了コードは`0`です。input、schema、binding用metadata、path、既存report保護、書込みerrorは`2`です。
 
-Cleanup Approval schema version 1はPlan fileの実bytes SHA-256へbindingし、`scope.mode=all-planned`でeligible actionだけをPlanのcanonical順のまま保持します。正式verifierはPlanとApprovalの両bytesを同時に検証し、Plan SHA-256に加えてsession、action、reason category、session manifest／tree digest、backup file／byte count、eligible、action順序がPlanのeligible action集合と完全一致することを必須にします。subset承認やPlan外actionは無効です。将来Cleanup Executionは必ずこのverifierを通し、Approval単体のparse結果だけで実行してはいけません。Plan/ApprovalはUTF-8、2-space indent、trailing newline、timestamp等なしで決定的です。既存fileは同じschemaのvalid reportだけatomic更新できます。この段階ではbackup file・directoryを変更せず、cleanup execution、`unlink`、`rmdir`、`rmtree`、自動retention、age／size／generation選択は実装していません。
+Cleanup Approval schema version 1はPlan fileの実bytes SHA-256へbindingし、`scope.mode=all-planned`でeligible actionだけをPlanのcanonical順のまま保持します。正式verifierはPlanとApprovalの両bytesを同時に検証し、Plan SHA-256に加えてsession、action、reason category、session manifest／tree digest、backup file／byte count、eligible、action順序がPlanのeligible action集合と完全一致することを必須にします。subset承認やPlan外actionは無効です。Plan/ApprovalはUTF-8、2-space indent、trailing newline、timestamp等なしで決定的です。既存fileは同じschemaのvalid reportだけatomic更新できます。
+
+`backup-cleanup-execute`は`--package-root`を必須とし、Inventory作成時の結果だけに依存せず、実行時にもPR1と同じroot safetyを再検証します。package rootとbackup rootの同一・双方向の包含、backup rootの検出可能なGit repository内配置、存在しない／unsafe directory、全path componentのsymlink・junction／reparse pointを削除前に拒否します。package rootはAuditへ記録せず、配下のMarkdown、Manifest、Metadata Sidecar、source PDF、その他fileを変更しません。
+
+その後に正式verifierを必ず通し、Inventory・Plan・Approvalの実bytes bindingと現在のsession manifest、tree、全backup fileのbytes／SHA-256を削除直前に再検証します。実行対象はApprovalに含まれる`delete-backup-session / explicit-retention-release`だけです。宣言済みregular backup fileを深い順、session manifest、空directory、session rootの順でno-follow削除し、backup root自体は残します。`shutil.rmtree`は使いません。symlink、junction／reparse point、未宣言entry、file／directory identity変更、digest変更を検出するとfail-fastし、後続sessionは`not-run`です。既に削除したsessionやfileは復元しません。このcleanupは明示承認後も不可逆であり、rollbackはありません。
+
+Cleanup Audit schema version 1はInventory、Plan、Approvalの各実bytes SHA-256、`planned / deleted / failed / not_run`件数、session相対名、削除前files／bytes／tree SHA-256、削除後存在有無だけを記録します。absolute path、username、hostname、cwd、command line、timestamp、tracebackは含めません。Auditはbackup rootとpackage rootの外にある新規pathだけへ出力できるimmutable execution recordです。既存のvalid Audit、foreign file、directory、symlink、junction／reparse point、読取り不能entryはcleanup開始前に拒否します。同一directoryのtemporary fileをfsyncした後、hard-link commitでcreate-only／no-clobber作成し、並行して作成されたfileを上書きしません。再実行時は別のreport pathを指定します。全削除成功は`0`、precondition／TOCTOU／部分削除を含むaction失敗は`1`、CLI・schema・binding・Audit書込み失敗は`2`です。cleanup成功後にAudit書込みが競合・失敗してもbackup sessionを復元しません。自動retentionと自動cleanupは対象外です。
 
 ### Recursive conversion / include・exclude filters
 

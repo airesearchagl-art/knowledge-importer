@@ -609,6 +609,12 @@ def _inspect_managed_session(session: Path) -> BackupInventorySession:
     )
 
 
+def inspect_managed_backup_session(session: Path) -> BackupInventorySession:
+    """Inspect one managed session without changing its filesystem tree."""
+
+    return _inspect_managed_session(session)
+
+
 def _inspect_legacy_session(session: Path) -> BackupInventorySession:
     name = session.name
     if is_link_or_reparse(session) or not session.is_dir():

@@ -26,6 +26,12 @@ from knowledge_importer.backup_cleanup_approval import (
     is_backup_cleanup_approval_report,
     write_backup_cleanup_approval,
 )
+from knowledge_importer.backup_cleanup_execution import (
+    BackupCleanupExecutionInputError,
+    execute_backup_cleanup,
+    validate_backup_cleanup_audit_output_path,
+    write_backup_cleanup_audit,
+)
 from knowledge_importer.backup_cleanup_plan import (
     build_backup_cleanup_plan,
     is_backup_cleanup_plan_report,
@@ -463,6 +469,42 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         required=True,
         help="決定的なBackup Cleanup Approval v1の出力先",
+    )
+    backup_cleanup_execute_parser = subparsers.add_parser(
+        "backup-cleanup-execute",
+        help="明示承認済みbackup sessionを不可逆削除",
+    )
+    backup_cleanup_execute_parser.add_argument(
+        "backup_root",
+        type=Path,
+        metavar="BACKUP_ROOT",
+        help="cleanupするmanaged backup root",
+    )
+    backup_cleanup_execute_parser.add_argument(
+        "--package-root",
+        type=Path,
+        metavar="PACKAGE_ROOT",
+        required=True,
+        help="変更禁止のKnowledge Package root",
+    )
+    for option, metavar, help_text in (
+        ("--inventory", "INVENTORY_JSON", "binding済みBackup Inventory v1"),
+        ("--plan", "PLAN_JSON", "explicit session Cleanup Plan v1"),
+        ("--approval", "APPROVAL_JSON", "all-planned Cleanup Approval v1"),
+    ):
+        backup_cleanup_execute_parser.add_argument(
+            option,
+            type=Path,
+            metavar=metavar,
+            required=True,
+            help=help_text,
+        )
+    backup_cleanup_execute_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="AUDIT_JSON",
+        required=True,
+        help="新規pathへcreate-onlyで作成するCleanup Audit v1",
     )
     return parser
 
@@ -905,6 +947,64 @@ def _run_backup_cleanup_approval(
     return 0
 
 
+def _run_backup_cleanup_execution(
+    backup_root: Path,
+    *,
+    package_root: Path,
+    inventory_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+    report_json: Path,
+) -> int:
+    inputs = (inventory_path, plan_path, approval_path)
+    if not all(
+        _cleanup_lifecycle_paths_are_safe(backup_root, input_path, report_json)
+        for input_path in inputs
+    ) or (
+        len({_path_comparison_key(path) for path in inputs}) != len(inputs)
+        or path_is_within(report_json, package_root)
+    ):
+        print("エラー: Cleanup Executionの入力または出力先を安全に検証できません", file=sys.stderr)
+        return 2
+    try:
+        validate_backup_cleanup_audit_output_path(report_json)
+    except (OSError, ValueError):
+        print("エラー: Cleanup Auditの出力先は新規pathを指定してください", file=sys.stderr)
+        return 2
+    try:
+        audit = execute_backup_cleanup(
+            package_root,
+            backup_root,
+            inventory_path=inventory_path,
+            plan_path=plan_path,
+            approval_path=approval_path,
+        )
+    except BackupCleanupExecutionInputError as exc:
+        LOGGER.error("backup_cleanup_execution_invalid exception_type=%s", type(exc).__name__)
+        print("Cleanup Executionのschemaまたはbindingを検証できませんでした。", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - setup details remain sanitized.
+        LOGGER.error("backup_cleanup_execution_failed exception_type=%s", type(exc).__name__)
+        print("Cleanup Executionを開始できませんでした。", file=sys.stderr)
+        return 2
+    for action in audit.actions:
+        print(f"Cleanup実行: session={action.session} status={action.status.value}")
+    try:
+        write_backup_cleanup_audit(report_json, audit)
+    except Exception as exc:  # noqa: BLE001 - deletion is never rolled back for report failure.
+        LOGGER.error("backup_cleanup_audit_write_failed exception_type=%s", type(exc).__name__)
+        print("Cleanup Auditを書き込めませんでした。", file=sys.stderr)
+        return 2
+    summary = audit.payload()["summary"]
+    assert isinstance(summary, dict)
+    print(
+        "Backup Cleanup: "
+        f"planned={summary['planned']} deleted={summary['deleted']} "
+        f"failed={summary['failed']} not_run={summary['not_run']}"
+    )
+    return audit.exit_code
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -962,6 +1062,15 @@ def run(
         return _run_backup_cleanup_approval(
             args.plan_json,
             backup_root=args.backup_root,
+            report_json=args.report_json,
+        )
+    if args.command == "backup-cleanup-execute":
+        return _run_backup_cleanup_execution(
+            args.backup_root,
+            package_root=args.package_root,
+            inventory_path=args.inventory,
+            plan_path=args.plan,
+            approval_path=args.approval,
             report_json=args.report_json,
         )
     if (

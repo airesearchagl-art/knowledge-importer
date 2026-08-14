@@ -78,6 +78,7 @@ def test_help_describes_convert_command() -> None:
     assert "backup-inventory" in help_text
     assert "backup-cleanup-plan" in help_text
     assert "approve-backup-cleanup" in help_text
+    assert "backup-cleanup-execute" in help_text
     assert "knowledge-importer" in help_text
 
 
@@ -172,6 +173,22 @@ def test_backup_cleanup_approval_requires_all_planned() -> None:
         )
 
     assert exc_info.value.code == 2
+
+
+def test_backup_cleanup_execute_help_describes_bound_inputs(capsys: object) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["backup-cleanup-execute", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    for option in (
+        "--package-root",
+        "--inventory",
+        "--plan",
+        "--approval",
+        "--report-json",
+    ):
+        assert option in help_text
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:

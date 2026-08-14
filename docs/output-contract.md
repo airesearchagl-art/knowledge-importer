@@ -511,7 +511,7 @@ sessionとitemはNFC正規化・casefoldを基準に固定順で出力します�
 
 分類は`managed`、`missing-session-manifest`、`invalid-session-manifest`、`interrupted-open-session`、`unexpected-entry`、`binding-unverifiable`、`legacy-unmanaged`です。backup root直下の既知session prefixに一致しないregular file、directory、symlink、junction／reparse point、その他のentryも無視せず、内容へ降りずに`unexpected-entry`として報告します。従来の`knowledge-importer-repair-*` sessionは自動移行せず`legacy-unmanaged`です。`planning_eligible=true`はvalidな`complete` sessionだけで、`open`、`rolled-back`、`rollback-failed`、orphan、invalid、legacy、unexpected entryはblocked寄りに扱います。このfieldはcleanup permissionではありません。v1のbinding検査はsession manifest内に記録されたbinding metadataのschema妥当性を確認し、元のManifest・Plan・Approval・Preflight実bytesとは再照合しません。
 
-Inventory reportはbackup root配下へ置けず、有効なBackup Inventory v1自身だけatomic更新できます。timestamp、hostname、username、cwd、command line、absolute path、tracebackを含めません。cleanup plan、cleanup approval、cleanup audit、cleanup execution、unlink、rmdir、rmtree、自動cleanup、age／size／generation retentionは未実装です。
+Inventory reportはbackup root配下へ置けず、有効なBackup Inventory v1自身だけatomic更新できます。timestamp、hostname、username、cwd、command line、absolute path、tracebackを含めません。Inventory単体は削除許可ではなく、age／size／generationによる自動cleanupは未実装です。
 
 終了コードは健全なmanaged sessionだけ（0 sessionを含む）なら`0`、interrupted、rollback failure、invalid、orphan、legacy-unmanaged検出時は`1`、CLI・root safety・report protection／write errorは`2`です。
 
@@ -565,6 +565,45 @@ PlanはInventory fileのparse後payloadではなく元file実bytesをSHA-256へ�
 }
 ```
 
-ApprovalはPlan fileの元実bytes SHA-256へexact-byte bindingし、`scope.mode=all-planned`を固定します。blocked／unsafe actionをApprovalへ含めるescape hatchはなく、approved action 0件もvalidです。同一Plan bytesからbyte-identicalなApprovalを生成します。standalone parserはApproval自身のschemaとaction semanticを検証し、正式verifierはPlan bytesとApproval bytesを同時にparseしてPlan SHA-256を再計算します。さらにPlanの全eligible actionとApproval actionを、session、action、reason category、session manifest SHA-256、tree SHA-256、backup files、backup bytes、eligible、順序まで完全一致で比較します。eligible actionの欠落、Plan外action、metadata改変、順序変更は拒否します。将来Cleanup ExecutionはApproval単体を信頼せず、必ずこのverifierを通過したPlan／Approvalだけを入力にします。PlanとApprovalの既存fileは各自のvalidなschema version 1だけatomic更新でき、Inventoryや他schema、Markdown、CSV、directory、linkを上書きしません。
+ApprovalはPlan fileの元実bytes SHA-256へexact-byte bindingし、`scope.mode=all-planned`を固定します。blocked／unsafe actionをApprovalへ含めるescape hatchはなく、approved action 0件もvalidです。同一Plan bytesからbyte-identicalなApprovalを生成します。standalone parserはApproval自身のschemaとaction semanticを検証し、正式verifierはPlan bytesとApproval bytesを同時にparseしてPlan SHA-256を再計算します。さらにPlanの全eligible actionとApproval actionを、session、action、reason category、session manifest SHA-256、tree SHA-256、backup files、backup bytes、eligible、順序まで完全一致で比較します。eligible actionの欠落、Plan外action、metadata改変、順序変更は拒否します。Cleanup ExecutionはApproval単体を信頼せず、必ずこのverifierを通過したPlan／Approvalだけを入力にします。PlanとApprovalの既存fileは各自のvalidなschema version 1だけatomic更新でき、Inventoryや他schema、Markdown、CSV、directory、linkを上書きしません。
 
-Plan／Approval生成の成功はblockedまたは0 actionを含めて`0`、CLI input、invalid schema、unsafe path、既存report衝突、write errorは`2`です。PR2はread-only planning／approvalだけで、cleanup execution、backup mutation、`unlink`、`rmdir`、`rmtree`、automatic retention、age／size／generation selectionを実装しません。
+Plan／Approval生成の成功はblockedまたは0 actionを含めて`0`、CLI input、invalid schema、unsafe path、既存report衝突、write errorは`2`です。
+
+## Backup Cleanup Audit schema version 1
+
+`knowledge-importer backup-cleanup-execute BACKUP_ROOT --package-root PACKAGE_ROOT --inventory INVENTORY_JSON --plan PLAN_JSON --approval APPROVAL_JSON --report-json AUDIT_JSON`は、明示承認済みのeligible sessionだけを不可逆に削除します。session selectorは追加で受け取らず、Approvalの`all-planned` scopeを唯一の実行対象とします。
+
+`--package-root`は実行時の必須preconditionです。Inventory作成時と同じroot validationを再実行し、package rootとbackup rootの同一・双方向の包含、backup rootの検出可能なGit repository内配置、存在しない／unsafe directory、全path componentのsymlink・junction／reparse pointを拒否します。package rootはAuditへ記録せず、その配下のMarkdown、Manifest、Metadata Sidecar、source PDF、その他fileを変更しません。
+
+root safety確認後にInventory、Plan、Approvalを元file実bytesから再読込みし、PlanとInventoryのSHA-256 binding、正式Approval verifierによるPlan exact-byte bindingとeligible action完全一致を確認します。各action直前にはsession manifest SHA-256、tree SHA-256、全backup fileのbytes／SHA-256、宣言済みtree、backup root・session・中間directory・file identityを再検証します。対象actionは`delete-backup-session / explicit-retention-release`だけです。blocked、legacy、open、rollback-failed、missing／invalid、unexpected、binding-unverifiable sessionは実行できません。
+
+削除は宣言済みregular backup fileを深い順、`session-manifest.json`、空の子directoryを深い順、session rootの順で行います。backup rootは削除しません。symlink、junction／reparse pointを追跡せず、`shutil.rmtree`や再帰的な一括削除は使用しません。追加entry、digest／bytes変更、file／directory identity差替えを検出した場合はfail-fastし、そのsessionを`failed`、後続を`not-run`にします。既に`deleted`になったsessionや部分削除済みfileを復元するrollbackはありません。
+
+```json
+{
+  "report_type": "knowledge-importer-backup-cleanup-audit",
+  "schema_version": 1,
+  "bindings": {
+    "inventory_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "plan_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "approval_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "summary": {"planned": 1, "deleted": 1, "failed": 0, "not_run": 0},
+  "actions": [
+    {
+      "session": "knowledge-importer-repair-v1-example",
+      "status": "deleted",
+      "before": {
+        "files": 1,
+        "bytes": 123,
+        "tree_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "after": {"exists": false}
+    }
+  ]
+}
+```
+
+Auditのaction順はApproval順と同じcanonical順です。statusは`deleted`、`failed`、`not-run`だけで、absolute path、username、hostname、cwd、command line、timestamp、tracebackを含めません。Auditはbackup root、package root、入力fileの外にある新規pathへだけ作成するimmutable execution recordです。既存のvalid Audit、foreign regular file、directory、symlink、junction／reparse point、読取り不能entryはcleanup開始前に拒否し、対象sessionを変更しません。再実行時は別のreport pathを指定します。
+
+書込みは同一directoryのtemporary fileをflush／fsyncした後、`os.link(..., follow_symlinks=False)`でcreate-only／no-clobber commitします。`Path.replace()`による既存finalの更新は行いません。cleanup後に別processがfinal pathを作成した場合、そのfileを保持してexit code `2`とし、削除済みsessionは復元しません。全action削除成功（0 actionを含む）は`0`、precondition／TOCTOU／部分削除／filesystem deletion失敗は`1`、CLI・schema・binding・report保護／書込み失敗は`2`です。自動retention、automatic cleanup、age／size／generation選択は実装しません。
