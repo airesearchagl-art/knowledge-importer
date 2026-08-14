@@ -1,0 +1,502 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+import knowledge_importer.backup_cleanup_execution as execution
+import knowledge_importer.backup_inventory as inventory_module
+import knowledge_importer.cli as cli
+from knowledge_importer.artifact_manifest import ArtifactDigest
+from knowledge_importer.backup_cleanup_approval import (
+    build_backup_cleanup_approval,
+    write_backup_cleanup_approval,
+)
+from knowledge_importer.backup_cleanup_execution import (
+    BackupCleanupAudit,
+    BackupCleanupAuditStatus,
+    parse_backup_cleanup_audit_bytes,
+)
+from knowledge_importer.backup_cleanup_plan import (
+    build_backup_cleanup_plan,
+    write_backup_cleanup_plan,
+)
+from knowledge_importer.backup_inventory import (
+    MANAGED_SESSION_PREFIX,
+    SESSION_MANIFEST_FILENAME,
+    BackupSessionBindings,
+    BackupSessionItem,
+    BackupSessionManifest,
+    BackupSessionState,
+    build_backup_inventory,
+    write_backup_inventory,
+    write_backup_session_manifest,
+)
+
+
+@pytest.fixture(autouse=True)
+def _ignore_workspace_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(inventory_module, "repository_roots", lambda path: ())
+    monkeypatch.setattr(execution, "repository_roots", lambda path: ())
+    monkeypatch.setattr(cli, "repository_roots", lambda path: ())
+
+
+def _session_name(suffix: str) -> str:
+    return f"{MANAGED_SESSION_PREFIX}{suffix}"
+
+
+def _managed_session(
+    backup_root: Path,
+    suffix: str,
+    *,
+    contents: tuple[bytes, ...] = (b"synthetic backup\n",),
+    state: BackupSessionState = BackupSessionState.COMPLETE,
+) -> Path:
+    session = backup_root / _session_name(suffix)
+    session.mkdir(parents=True)
+    items: list[BackupSessionItem] = []
+    for index, content in enumerate(contents):
+        source = f"documents/item-{index}.metadata.json"
+        backup = f"{index:04d}/{source}.bak"
+        path = session / Path(*backup.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        items.append(
+            BackupSessionItem(
+                source,
+                backup,
+                ArtifactDigest(len(content), hashlib.sha256(content).hexdigest()),
+            )
+        )
+    manifest = BackupSessionManifest(
+        state,
+        BackupSessionBindings("a" * 64, "b" * 64, "c" * 64, "d" * 64),
+        tuple(items),
+    )
+    write_backup_session_manifest(
+        session / SESSION_MANIFEST_FILENAME,
+        manifest,
+        expected_current=None,
+    )
+    return session
+
+
+def _lifecycle(
+    tmp_path: Path,
+    suffixes: tuple[str, ...] = ("alpha",),
+    *,
+    contents: tuple[bytes, ...] = (b"synthetic backup\n",),
+    states: dict[str, BackupSessionState] | None = None,
+) -> tuple[Path, Path, Path, Path, Path, Path]:
+    package_root = tmp_path / "package"
+    backup_root = tmp_path / "backups"
+    reports = tmp_path / "reports"
+    package_root.mkdir()
+    backup_root.mkdir()
+    reports.mkdir()
+    for suffix in suffixes:
+        _managed_session(
+            backup_root,
+            suffix,
+            contents=contents,
+            state=(states or {}).get(suffix, BackupSessionState.COMPLETE),
+        )
+
+    inventory_path = reports / "inventory.json"
+    plan_path = reports / "plan.json"
+    approval_path = reports / "approval.json"
+    audit_path = reports / "audit.json"
+    inventory = build_backup_inventory(package_root, backup_root)
+    write_backup_inventory(inventory_path, inventory)
+    plan = build_backup_cleanup_plan(
+        inventory_path,
+        tuple(_session_name(suffix) for suffix in suffixes),
+    )
+    write_backup_cleanup_plan(plan_path, plan)
+    approval = build_backup_cleanup_approval(plan_path)
+    write_backup_cleanup_approval(approval_path, approval)
+    return backup_root, inventory_path, plan_path, approval_path, audit_path, package_root
+
+
+def _args(
+    backup_root: Path,
+    inventory_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+    audit_path: Path,
+) -> list[str]:
+    return [
+        "backup-cleanup-execute",
+        str(backup_root),
+        "--inventory",
+        str(inventory_path),
+        "--plan",
+        str(plan_path),
+        "--approval",
+        str(approval_path),
+        "--report-json",
+        str(audit_path),
+    ]
+
+
+def _run_lifecycle(paths: tuple[Path, Path, Path, Path, Path, Path]) -> int:
+    return cli.run(_args(*paths[:5]))
+
+
+def _audit(path: Path) -> BackupCleanupAudit:
+    return parse_backup_cleanup_audit_bytes(path.read_bytes())
+
+
+def test_single_approved_session_is_deleted_with_deterministic_audit(
+    tmp_path: Path,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    backup_root, _, _, _, audit_path, package_root = paths
+    package_file = package_root / "document.md"
+    package_file.write_bytes(b"package bytes")
+
+    assert _run_lifecycle(paths) == 0
+
+    assert backup_root.is_dir()
+    assert not (backup_root / _session_name("alpha")).exists()
+    assert package_file.read_bytes() == b"package bytes"
+    audit = _audit(audit_path)
+    assert audit.actions[0].status is BackupCleanupAuditStatus.DELETED
+    assert audit.actions[0].after_exists is False
+    assert audit.payload()["summary"] == {
+        "planned": 1,
+        "deleted": 1,
+        "failed": 0,
+        "not_run": 0,
+    }
+
+
+def test_multiple_sessions_are_deleted_in_canonical_order(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path, ("zulu", "alpha"))
+
+    assert _run_lifecycle(paths) == 0
+
+    audit = _audit(paths[4])
+    assert [action.session for action in audit.actions] == [
+        _session_name("alpha"),
+        _session_name("zulu"),
+    ]
+    assert all(action.status is BackupCleanupAuditStatus.DELETED for action in audit.actions)
+
+
+@pytest.mark.parametrize("bound_input", ["inventory", "plan", "approval"])
+def test_exact_input_tamper_is_rejected_before_deletion(
+    tmp_path: Path,
+    bound_input: str,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    indexes = {"inventory": 1, "plan": 2, "approval": 3}
+    target = paths[indexes[bound_input]]
+    if bound_input == "approval":
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        payload["approved_actions"][0]["backup_bytes"] += 1
+        target.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        target.write_bytes(target.read_bytes().replace(b"\n", b"\r\n"))
+
+    assert _run_lifecycle(paths) == 2
+    assert (paths[0] / _session_name("alpha")).is_dir()
+    assert not paths[4].exists()
+
+
+@pytest.mark.parametrize("mutation", ["manifest", "backup", "extra-file", "extra-directory"])
+def test_session_change_is_failed_without_deleting_session(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    session = paths[0] / _session_name("alpha")
+    if mutation == "manifest":
+        (session / SESSION_MANIFEST_FILENAME).write_bytes(b"tampered")
+    elif mutation == "backup":
+        next(session.rglob("*.bak")).write_bytes(b"tampered")
+    elif mutation == "extra-file":
+        (session / "unexpected.bin").write_bytes(b"unexpected")
+    else:
+        (session / "unexpected").mkdir()
+
+    assert _run_lifecycle(paths) == 1
+
+    audit = _audit(paths[4])
+    assert audit.actions[0].status is BackupCleanupAuditStatus.FAILED
+    assert audit.actions[0].after_exists is True
+    assert session.exists()
+
+
+def test_blocked_session_is_not_in_approval_scope_or_deleted(tmp_path: Path) -> None:
+    paths = _lifecycle(
+        tmp_path,
+        ("alpha", "rolled-back"),
+        states={"rolled-back": BackupSessionState.ROLLED_BACK},
+    )
+
+    assert _run_lifecycle(paths) == 0
+
+    audit = _audit(paths[4])
+    assert [action.session for action in audit.actions] == [_session_name("alpha")]
+    assert (paths[0] / _session_name("rolled-back")).is_dir()
+
+
+def test_failure_stops_later_sessions_without_restoring_deleted_session(
+    tmp_path: Path,
+) -> None:
+    paths = _lifecycle(tmp_path, ("alpha", "middle", "zulu"))
+    failed_session = paths[0] / _session_name("middle")
+    (failed_session / "unexpected.bin").write_bytes(b"race")
+
+    assert _run_lifecycle(paths) == 1
+
+    audit = _audit(paths[4])
+    assert [action.status for action in audit.actions] == [
+        BackupCleanupAuditStatus.DELETED,
+        BackupCleanupAuditStatus.FAILED,
+        BackupCleanupAuditStatus.NOT_RUN,
+    ]
+    assert not (paths[0] / _session_name("alpha")).exists()
+    assert failed_session.exists()
+    assert (paths[0] / _session_name("zulu")).exists()
+
+
+def test_partial_file_deletion_failure_has_no_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path, contents=(b"first", b"second"))
+    session = paths[0] / _session_name("alpha")
+    first = session / "0000/documents/item-0.metadata.json.bak"
+    second = session / "0001/documents/item-1.metadata.json.bak"
+    original_unlink = Path.unlink
+
+    def fail_second(path: Path, *args: object, **kwargs: object) -> None:
+        if path == second:
+            raise PermissionError("synthetic denial")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_second)
+
+    assert _run_lifecycle(paths) == 1
+    assert not first.exists()
+    assert second.exists()
+    assert _audit(paths[4]).actions[0].status is BackupCleanupAuditStatus.FAILED
+
+
+def test_file_identity_swap_immediately_before_delete_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    original = execution._digest_regular_file
+    swapped = False
+
+    def swap_after_digest(path: Path):  # type: ignore[no-untyped-def]
+        nonlocal swapped
+        result = original(path)
+        if path.suffix == ".bak" and not swapped:
+            swapped = True
+            content = path.read_bytes()
+            path.unlink()
+            path.write_bytes(content)
+        return result
+
+    monkeypatch.setattr(execution, "_digest_regular_file", swap_after_digest)
+
+    assert _run_lifecycle(paths) == 1
+    assert swapped
+    assert next((paths[0] / _session_name("alpha")).rglob("*.bak")).exists()
+
+
+def test_extra_entry_injected_after_action_validation_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    session = paths[0] / _session_name("alpha")
+    original = execution._validate_actual_session
+
+    def inject_extra(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        result = original(*args, **kwargs)  # type: ignore[arg-type]
+        (session / "injected.bin").write_bytes(b"race")
+        return result
+
+    monkeypatch.setattr(execution, "_validate_actual_session", inject_extra)
+
+    assert _run_lifecycle(paths) == 1
+    assert (session / "injected.bin").read_bytes() == b"race"
+    assert next(session.rglob("*.bak")).exists()
+
+
+def test_session_directory_identity_swap_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    session = paths[0] / _session_name("alpha")
+    holding = tmp_path / "original-session"
+    original = execution._capture_session_directory_identities
+    calls = 0
+
+    def swap_after_capture(path: Path, items: tuple[BackupSessionItem, ...]):
+        nonlocal calls
+        result = original(path, items)
+        calls += 1
+        if calls == 1:
+            path.rename(holding)
+            shutil.copytree(holding, path)
+        return result
+
+    monkeypatch.setattr(execution, "_capture_session_directory_identities", swap_after_capture)
+
+    assert _run_lifecycle(paths) == 1
+    assert session.exists()
+    assert holding.exists()
+
+
+def test_linked_backup_file_is_rejected_without_following_target(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    session = paths[0] / _session_name("alpha")
+    backup = next(session.rglob("*.bak"))
+    external = tmp_path / "external.bin"
+    external.write_bytes(b"external")
+    backup.unlink()
+    try:
+        backup.symlink_to(external)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+
+    assert _run_lifecycle(paths) == 1
+    assert external.read_bytes() == b"external"
+    assert backup.is_symlink()
+
+
+def test_intermediate_reparse_detection_stops_before_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    session = paths[0] / _session_name("alpha")
+    intermediate = session / "0000"
+    original = execution.is_link_or_reparse
+
+    monkeypatch.setattr(
+        execution,
+        "is_link_or_reparse",
+        lambda path: path == intermediate or original(path),
+    )
+
+    assert _run_lifecycle(paths) == 1
+    assert next(session.rglob("*.bak")).exists()
+
+
+def test_declared_files_manifest_and_directories_use_safe_deletion_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path, contents=(b"first", b"second"))
+    session = paths[0] / _session_name("alpha")
+    deleted_files: list[str] = []
+    deleted_directories: list[str] = []
+    original_file_delete = execution._delete_verified_file
+    original_directory_delete = execution._remove_verified_empty_directory
+
+    def record_file(path: Path, *args: object, **kwargs: object) -> None:
+        deleted_files.append(path.relative_to(session).as_posix())
+        original_file_delete(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    def record_directory(path: Path, *args: object, **kwargs: object) -> None:
+        deleted_directories.append("." if path == session else path.relative_to(session).as_posix())
+        original_directory_delete(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution, "_delete_verified_file", record_file)
+    monkeypatch.setattr(execution, "_remove_verified_empty_directory", record_directory)
+
+    assert _run_lifecycle(paths) == 0
+    assert deleted_files[-1] == SESSION_MANIFEST_FILENAME
+    assert all(name.endswith(".bak") for name in deleted_files[:-1])
+    assert deleted_directories[-1] == "."
+    assert paths[0].is_dir()
+
+
+def test_audit_write_failure_does_not_restore_deleted_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+
+    def fail_write(path: Path, audit: object) -> None:
+        raise OSError("synthetic report failure")
+
+    monkeypatch.setattr(cli, "write_backup_cleanup_audit", fail_write)
+
+    assert _run_lifecycle(paths) == 2
+    assert not (paths[0] / _session_name("alpha")).exists()
+    assert not paths[4].exists()
+
+
+def test_foreign_audit_is_preserved_and_execution_does_not_start(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    paths[4].write_bytes(b"foreign report")
+
+    assert _run_lifecycle(paths) == 2
+    assert paths[4].read_bytes() == b"foreign report"
+    assert (paths[0] / _session_name("alpha")).exists()
+
+
+def test_inputs_and_audit_must_be_outside_backup_root(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    inside = paths[0] / "audit.json"
+
+    assert cli.run(_args(paths[0], paths[1], paths[2], paths[3], inside)) == 2
+    assert (paths[0] / _session_name("alpha")).exists()
+
+
+def test_backup_root_inside_repository_is_rejected_before_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    monkeypatch.setattr(cli, "repository_roots", lambda path: (tmp_path.resolve(),))
+
+    assert _run_lifecycle(paths) == 2
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not paths[4].exists()
+
+
+def test_console_and_audit_do_not_expose_absolute_paths_or_tracebacks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    paths = _lifecycle(tmp_path)
+    (paths[0] / _session_name("alpha") / "unexpected.bin").write_bytes(b"failure")
+
+    assert _run_lifecycle(paths) == 1
+
+    output = capsys.readouterr()
+    combined = output.out + output.err + paths[4].read_text(encoding="utf-8")
+    assert str(tmp_path) not in combined
+    assert "Traceback" not in combined
+    assert _session_name("alpha") in combined
+
+
+def test_empty_approval_produces_empty_audit_without_deleting_blocked_session(
+    tmp_path: Path,
+) -> None:
+    paths = _lifecycle(
+        tmp_path,
+        ("rolled-back",),
+        states={"rolled-back": BackupSessionState.ROLLED_BACK},
+    )
+
+    assert _run_lifecycle(paths) == 0
+    first = paths[4].read_bytes()
+    assert _run_lifecycle(paths) == 0
+    assert paths[4].read_bytes() == first
+    assert _audit(paths[4]).actions == ()
+    assert (paths[0] / _session_name("rolled-back")).exists()
