@@ -571,9 +571,11 @@ Plan／Approval生成の成功はblockedまたは0 actionを含めて`0`、CLI i
 
 ## Backup Cleanup Audit schema version 1
 
-`knowledge-importer backup-cleanup-execute BACKUP_ROOT --inventory INVENTORY_JSON --plan PLAN_JSON --approval APPROVAL_JSON --report-json AUDIT_JSON`は、明示承認済みのeligible sessionだけを不可逆に削除します。session selectorは追加で受け取らず、Approvalの`all-planned` scopeを唯一の実行対象とします。
+`knowledge-importer backup-cleanup-execute BACKUP_ROOT --package-root PACKAGE_ROOT --inventory INVENTORY_JSON --plan PLAN_JSON --approval APPROVAL_JSON --report-json AUDIT_JSON`は、明示承認済みのeligible sessionだけを不可逆に削除します。session selectorは追加で受け取らず、Approvalの`all-planned` scopeを唯一の実行対象とします。
 
-実行前にInventory、Plan、Approvalを元file実bytesから再読込みし、PlanとInventoryのSHA-256 binding、正式Approval verifierによるPlan exact-byte bindingとeligible action完全一致を確認します。各action直前にはsession manifest SHA-256、tree SHA-256、全backup fileのbytes／SHA-256、宣言済みtree、backup root・session・中間directory・file identityを再検証します。対象actionは`delete-backup-session / explicit-retention-release`だけです。blocked、legacy、open、rollback-failed、missing／invalid、unexpected、binding-unverifiable sessionは実行できません。
+`--package-root`は実行時の必須preconditionです。Inventory作成時と同じroot validationを再実行し、package rootとbackup rootの同一・双方向の包含、backup rootの検出可能なGit repository内配置、存在しない／unsafe directory、全path componentのsymlink・junction／reparse pointを拒否します。package rootはAuditへ記録せず、その配下のMarkdown、Manifest、Metadata Sidecar、source PDF、その他fileを変更しません。
+
+root safety確認後にInventory、Plan、Approvalを元file実bytesから再読込みし、PlanとInventoryのSHA-256 binding、正式Approval verifierによるPlan exact-byte bindingとeligible action完全一致を確認します。各action直前にはsession manifest SHA-256、tree SHA-256、全backup fileのbytes／SHA-256、宣言済みtree、backup root・session・中間directory・file identityを再検証します。対象actionは`delete-backup-session / explicit-retention-release`だけです。blocked、legacy、open、rollback-failed、missing／invalid、unexpected、binding-unverifiable sessionは実行できません。
 
 削除は宣言済みregular backup fileを深い順、`session-manifest.json`、空の子directoryを深い順、session rootの順で行います。backup rootは削除しません。symlink、junction／reparse pointを追跡せず、`shutil.rmtree`や再帰的な一括削除は使用しません。追加entry、digest／bytes変更、file／directory identity差替えを検出した場合はfail-fastし、そのsessionを`failed`、後続を`not-run`にします。既に`deleted`になったsessionや部分削除済みfileを復元するrollbackはありません。
 
@@ -602,4 +604,4 @@ Plan／Approval生成の成功はblockedまたは0 actionを含めて`0`、CLI i
 }
 ```
 
-Auditのaction順はApproval順と同じcanonical順です。statusは`deleted`、`failed`、`not-run`だけで、absolute path、username、hostname、cwd、command line、timestamp、tracebackを含めません。Auditはbackup rootと入力fileの外に置き、有効なAudit v1自身だけatomic更新できます。全action削除成功（0 actionを含む）は`0`、precondition／TOCTOU／部分削除／filesystem deletion失敗は`1`、CLI・schema・binding・report保護／書込み失敗は`2`です。削除後のAudit書込み失敗でも復元は行いません。自動retention、automatic cleanup、age／size／generation選択は実装しません。
+Auditのaction順はApproval順と同じcanonical順です。statusは`deleted`、`failed`、`not-run`だけで、absolute path、username、hostname、cwd、command line、timestamp、tracebackを含めません。Auditはbackup root、package root、入力fileの外に置きます。出力先が不存在なら同一directoryのtemporary fileからhard-link commitしてno-clobber作成します。既存の有効なAudit v1を更新する場合は、削除前にcaptureした実bytesとfilesystem identityが書込み直前にも一致することを再確認してからatomic replaceします。並行して作成・差替えられたforeign fileやAuditは上書きせずreport失敗とします。全action削除成功（0 actionを含む）は`0`、precondition／TOCTOU／部分削除／filesystem deletion失敗は`1`、CLI・schema・binding・report保護／書込み失敗は`2`です。削除後のAudit書込み失敗でも復元は行いません。自動retention、automatic cleanup、age／size／generation選択は実装しません。

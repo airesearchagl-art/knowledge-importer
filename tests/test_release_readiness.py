@@ -209,7 +209,13 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
         assert option in backup_cleanup_plan_help
     for option in ("--backup-root", "--all-planned", "--report-json"):
         assert option in backup_cleanup_approval_help
-    for option in ("--inventory", "--plan", "--approval", "--report-json"):
+    for option in (
+        "--package-root",
+        "--inventory",
+        "--plan",
+        "--approval",
+        "--report-json",
+    ):
         assert option in backup_cleanup_execute_help
     metadata = _run_command(
         [

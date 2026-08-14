@@ -7,7 +7,9 @@ import json
 import os
 import re
 import stat
+import tempfile
 import unicodedata
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -21,6 +23,7 @@ from knowledge_importer.backup_cleanup_plan import (
 )
 from knowledge_importer.backup_inventory import (
     SESSION_MANIFEST_FILENAME,
+    BackupInventoryInputError,
     BackupInventorySession,
     BackupSessionClassification,
     BackupSessionItem,
@@ -30,8 +33,8 @@ from knowledge_importer.backup_inventory import (
     parse_backup_inventory_bytes,
     path_uses_link_or_reparse,
     repository_roots,
+    validate_backup_root,
 )
-from knowledge_importer.json_writer import write_json_atomically
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK_SIZE = 1024 * 1024
@@ -123,6 +126,12 @@ class _ExecutionInputs:
     approval_sha256: str
     inventory_sessions: dict[str, BackupInventorySession]
     actions: tuple[BackupCleanupAction, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BackupCleanupAuditOutputState:
+    content: bytes | None
+    identity: tuple[int, int, int, int] | None
 
 
 def _comparison_key(value: str) -> str:
@@ -517,6 +526,7 @@ def _before(action: BackupCleanupAction) -> BackupCleanupAuditBefore:
 
 
 def execute_backup_cleanup(
+    package_root: Path,
     backup_root: Path,
     *,
     inventory_path: Path,
@@ -526,14 +536,17 @@ def execute_backup_cleanup(
     """Execute only exactly approved sessions; no rollback is attempted."""
 
     try:
+        validate_backup_root(package_root, backup_root)
+        package_resolved = package_root.resolve()
         backup_resolved = backup_root.resolve(strict=False)
         overlaps_repository = any(
             backup_resolved == root or backup_resolved.is_relative_to(root)
             for root in repository_roots(backup_root)
         )
-    except OSError as exc:
+        package_inside_backup = package_resolved.is_relative_to(backup_resolved)
+    except (BackupInventoryInputError, OSError) as exc:
         raise BackupCleanupExecutionInputError("unsafe cleanup backup root") from exc
-    if not backup_root.is_dir() or path_uses_link_or_reparse(backup_root) or overlaps_repository:
+    if overlaps_repository or package_inside_backup:
         raise BackupCleanupExecutionInputError("unsafe cleanup backup root")
     try:
         backup_root_identity = _directory_identity(backup_root)
@@ -680,16 +693,70 @@ def parse_backup_cleanup_audit_bytes(content: bytes) -> BackupCleanupAudit:
 def is_backup_cleanup_audit_report(path: Path) -> bool:
     """Return whether an existing regular file is a Cleanup Audit v1."""
 
-    if path_uses_link_or_reparse(path):
-        return False
     try:
-        parse_backup_cleanup_audit_bytes(read_input_bytes(path))
+        state = capture_backup_cleanup_audit_output(path)
     except (OSError, ValueError):
         return False
-    return True
+    return state.content is not None
 
 
-def write_backup_cleanup_audit(path: Path, audit: BackupCleanupAudit) -> None:
-    """Write a deterministic Cleanup Audit v1 atomically."""
+def capture_backup_cleanup_audit_output(path: Path) -> BackupCleanupAuditOutputState:
+    """Capture a valid existing Audit's exact bytes and stable identity."""
 
-    write_json_atomically(path, audit.payload())
+    if not path.exists() and not path.is_symlink():
+        return BackupCleanupAuditOutputState(None, None)
+    if path_uses_link_or_reparse(path):
+        raise ValueError("unsafe Cleanup Audit output")
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("Cleanup Audit output is not a regular file")
+    content = read_input_bytes(path)
+    parse_backup_cleanup_audit_bytes(content)
+    after = path.lstat()
+    identity = _stable_identity(before)
+    if _stable_identity(after) != identity or path_uses_link_or_reparse(path):
+        raise ValueError("Cleanup Audit output changed")
+    return BackupCleanupAuditOutputState(content, identity)
+
+
+def write_backup_cleanup_audit(
+    path: Path,
+    audit: BackupCleanupAudit,
+    *,
+    expected_output: BackupCleanupAuditOutputState,
+) -> None:
+    """Commit a deterministic Audit without clobbering a concurrent new file."""
+
+    if path_uses_link_or_reparse(path):
+        raise OSError("unsafe Cleanup Audit output")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path_uses_link_or_reparse(path.parent) or not path.parent.is_dir():
+        raise OSError("unsafe Cleanup Audit output parent")
+    content = (json.dumps(audit.payload(), ensure_ascii=False, indent=2) + "\n").encode()
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+
+        current = capture_backup_cleanup_audit_output(path)
+        if current != expected_output:
+            raise OSError("Cleanup Audit output changed")
+        if expected_output.content is None:
+            os.link(temporary, path, follow_symlinks=False)
+        else:
+            temporary.replace(path)
+        if read_input_bytes(path) != content:
+            raise OSError("Cleanup Audit output verification failed")
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)

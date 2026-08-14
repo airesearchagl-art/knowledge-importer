@@ -223,6 +223,7 @@ uv run knowledge-importer approve-backup-cleanup .\reports\backup-cleanup-plan.j
   --report-json .\reports\backup-cleanup-approval.json
 
 uv run knowledge-importer backup-cleanup-execute D:\safe-backups\knowledge-importer `
+  --package-root .\output `
   --inventory .\reports\backup-inventory.json `
   --plan .\reports\backup-cleanup-plan.json `
   --approval .\reports\backup-cleanup-approval.json `
@@ -233,9 +234,11 @@ Cleanup Plan schema version 1は入力Inventory fileの実bytes SHA-256へbindin
 
 Cleanup Approval schema version 1はPlan fileの実bytes SHA-256へbindingし、`scope.mode=all-planned`でeligible actionだけをPlanのcanonical順のまま保持します。正式verifierはPlanとApprovalの両bytesを同時に検証し、Plan SHA-256に加えてsession、action、reason category、session manifest／tree digest、backup file／byte count、eligible、action順序がPlanのeligible action集合と完全一致することを必須にします。subset承認やPlan外actionは無効です。Plan/ApprovalはUTF-8、2-space indent、trailing newline、timestamp等なしで決定的です。既存fileは同じschemaのvalid reportだけatomic更新できます。
 
-`backup-cleanup-execute`はこのverifierを必ず通し、Inventory・Plan・Approvalの実bytes bindingと現在のsession manifest、tree、全backup fileのbytes／SHA-256を削除直前に再検証します。実行対象はApprovalに含まれる`delete-backup-session / explicit-retention-release`だけです。宣言済みregular backup fileを深い順、session manifest、空directory、session rootの順でno-follow削除し、backup root自体は残します。`shutil.rmtree`は使いません。symlink、junction／reparse point、未宣言entry、file／directory identity変更、digest変更を検出するとfail-fastし、後続sessionは`not-run`です。既に削除したsessionやfileは復元しません。このcleanupは明示承認後も不可逆であり、rollbackはありません。
+`backup-cleanup-execute`は`--package-root`を必須とし、Inventory作成時の結果だけに依存せず、実行時にもPR1と同じroot safetyを再検証します。package rootとbackup rootの同一・双方向の包含、backup rootの検出可能なGit repository内配置、存在しない／unsafe directory、全path componentのsymlink・junction／reparse pointを削除前に拒否します。package rootはAuditへ記録せず、配下のMarkdown、Manifest、Metadata Sidecar、source PDF、その他fileを変更しません。
 
-Cleanup Audit schema version 1はInventory、Plan、Approvalの各実bytes SHA-256、`planned / deleted / failed / not_run`件数、session相対名、削除前files／bytes／tree SHA-256、削除後存在有無だけを記録します。absolute path、username、hostname、cwd、command line、timestamp、tracebackは含めません。Auditはbackup root外にだけatomic出力でき、有効なCleanup Audit v1自身だけ更新できます。全削除成功は`0`、precondition／TOCTOU／部分削除を含むaction失敗は`1`、CLI・schema・binding・Audit書込み失敗は`2`です。Audit書込み失敗が削除後に起きても復元しません。自動retentionと自動cleanupは対象外です。
+その後に正式verifierを必ず通し、Inventory・Plan・Approvalの実bytes bindingと現在のsession manifest、tree、全backup fileのbytes／SHA-256を削除直前に再検証します。実行対象はApprovalに含まれる`delete-backup-session / explicit-retention-release`だけです。宣言済みregular backup fileを深い順、session manifest、空directory、session rootの順でno-follow削除し、backup root自体は残します。`shutil.rmtree`は使いません。symlink、junction／reparse point、未宣言entry、file／directory identity変更、digest変更を検出するとfail-fastし、後続sessionは`not-run`です。既に削除したsessionやfileは復元しません。このcleanupは明示承認後も不可逆であり、rollbackはありません。
+
+Cleanup Audit schema version 1はInventory、Plan、Approvalの各実bytes SHA-256、`planned / deleted / failed / not_run`件数、session相対名、削除前files／bytes／tree SHA-256、削除後存在有無だけを記録します。absolute path、username、hostname、cwd、command line、timestamp、tracebackは含めません。Auditはbackup rootとpackage rootの外にだけ出力できます。新規fileはhard-link commitでno-clobber作成し、既存の有効なCleanup Audit v1は削除前に取得した実bytes・filesystem identityが書込み直前にも一致する場合だけatomic更新します。並行して作成・差替えられたfileは上書きしません。全削除成功は`0`、precondition／TOCTOU／部分削除を含むaction失敗は`1`、CLI・schema・binding・Audit書込み失敗は`2`です。Audit書込み失敗が削除後に起きても復元しません。自動retentionと自動cleanupは対象外です。
 
 ### Recursive conversion / include・exclude filters
 

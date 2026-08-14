@@ -17,8 +17,10 @@ from knowledge_importer.backup_cleanup_approval import (
 )
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAudit,
+    BackupCleanupAuditOutputState,
     BackupCleanupAuditStatus,
     parse_backup_cleanup_audit_bytes,
+    write_backup_cleanup_audit,
 )
 from knowledge_importer.backup_cleanup_plan import (
     build_backup_cleanup_plan,
@@ -127,10 +129,13 @@ def _args(
     plan_path: Path,
     approval_path: Path,
     audit_path: Path,
+    package_root: Path,
 ) -> list[str]:
     return [
         "backup-cleanup-execute",
         str(backup_root),
+        "--package-root",
+        str(package_root),
         "--inventory",
         str(inventory_path),
         "--plan",
@@ -143,11 +148,19 @@ def _args(
 
 
 def _run_lifecycle(paths: tuple[Path, Path, Path, Path, Path, Path]) -> int:
-    return cli.run(_args(*paths[:5]))
+    return cli.run(_args(*paths))
 
 
 def _audit(path: Path) -> BackupCleanupAudit:
     return parse_backup_cleanup_audit_bytes(path.read_bytes())
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
 
 
 def test_single_approved_session_is_deleted_with_deterministic_audit(
@@ -430,7 +443,7 @@ def test_audit_write_failure_does_not_restore_deleted_session(
 ) -> None:
     paths = _lifecycle(tmp_path)
 
-    def fail_write(path: Path, audit: object) -> None:
+    def fail_write(path: Path, audit: object, *, expected_output: object) -> None:
         raise OSError("synthetic report failure")
 
     monkeypatch.setattr(cli, "write_backup_cleanup_audit", fail_write)
@@ -453,7 +466,18 @@ def test_inputs_and_audit_must_be_outside_backup_root(tmp_path: Path) -> None:
     paths = _lifecycle(tmp_path)
     inside = paths[0] / "audit.json"
 
-    assert cli.run(_args(paths[0], paths[1], paths[2], paths[3], inside)) == 2
+    assert cli.run(_args(paths[0], paths[1], paths[2], paths[3], inside, paths[5])) == 2
+    assert (paths[0] / _session_name("alpha")).exists()
+
+
+def test_audit_must_be_outside_package_root(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    inside = paths[5] / "cleanup-audit.json"
+    before = _snapshot(paths[5])
+
+    assert cli.run(_args(paths[0], paths[1], paths[2], paths[3], inside, paths[5])) == 2
+    assert _snapshot(paths[5]) == before
+    assert not inside.exists()
     assert (paths[0] / _session_name("alpha")).exists()
 
 
@@ -467,6 +491,190 @@ def test_backup_root_inside_repository_is_rejected_before_deletion(
     assert _run_lifecycle(paths) == 2
     assert (paths[0] / _session_name("alpha")).exists()
     assert not paths[4].exists()
+
+
+@pytest.mark.parametrize("layout", ["equal", "backup-inside-package", "package-inside-backup"])
+def test_package_and_backup_overlap_is_rejected_without_mutation(
+    tmp_path: Path,
+    layout: str,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    backup_root, inventory_path, plan_path, approval_path, audit_path, package_root = paths
+    if layout == "equal":
+        package_root = backup_root
+    elif layout == "backup-inside-package":
+        moved = package_root / "backups"
+        backup_root.rename(moved)
+        backup_root = moved
+    else:
+        moved = backup_root / "package"
+        package_root.rename(moved)
+        package_root = moved
+    before_backup = _snapshot(backup_root)
+    before_package = _snapshot(package_root)
+
+    assert (
+        cli.run(
+            _args(
+                backup_root,
+                inventory_path,
+                plan_path,
+                approval_path,
+                audit_path,
+                package_root,
+            )
+        )
+        == 2
+    )
+    assert _snapshot(backup_root) == before_backup
+    assert _snapshot(package_root) == before_package
+    assert not audit_path.exists()
+
+
+def test_backup_root_inside_detected_git_repository_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    before = _snapshot(paths[0])
+    repository = tmp_path.resolve()
+    monkeypatch.setattr(inventory_module, "repository_roots", lambda path: (repository,))
+    monkeypatch.setattr(execution, "repository_roots", lambda path: (repository,))
+    monkeypatch.setattr(cli, "repository_roots", lambda path: (repository,))
+
+    assert _run_lifecycle(paths) == 2
+    assert _snapshot(paths[0]) == before
+    assert not paths[4].exists()
+
+
+@pytest.mark.parametrize("unsafe_root", ["package", "backup"])
+def test_root_reparse_is_rejected_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_root: str,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    target = paths[5] if unsafe_root == "package" else paths[0]
+    before = _snapshot(paths[0])
+    original = inventory_module.is_link_or_reparse
+    monkeypatch.setattr(
+        inventory_module,
+        "is_link_or_reparse",
+        lambda path: path.absolute() == target.absolute() or original(path),
+    )
+
+    assert _run_lifecycle(paths) == 2
+    assert _snapshot(paths[0]) == before
+    assert not paths[4].exists()
+
+
+@pytest.mark.parametrize("linked_root", ["package", "backup"])
+def test_root_symlink_is_rejected_without_following_target(
+    tmp_path: Path,
+    linked_root: str,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    backup_root = paths[0]
+    package_root = paths[5]
+    target = package_root if linked_root == "package" else backup_root
+    alias = tmp_path / f"{linked_root}-link"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is not permitted")
+    if linked_root == "package":
+        package_root = alias
+    else:
+        backup_root = alias
+    before_backup = _snapshot(paths[0])
+    before_package = _snapshot(paths[5])
+
+    assert (
+        cli.run(
+            _args(
+                backup_root,
+                paths[1],
+                paths[2],
+                paths[3],
+                paths[4],
+                package_root,
+            )
+        )
+        == 2
+    )
+    assert _snapshot(paths[0]) == before_backup
+    assert _snapshot(paths[5]) == before_package
+    assert not paths[4].exists()
+
+
+def test_valid_external_roots_cleanup_and_keep_package_byte_identical(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    package_file = paths[5] / "knowledge.md"
+    package_file.write_bytes(b"immutable package content")
+    before = _snapshot(paths[5])
+
+    assert _run_lifecycle(paths) == 0
+    assert _snapshot(paths[5]) == before
+    assert paths[0].is_dir()
+    assert not (paths[0] / _session_name("alpha")).exists()
+
+
+def test_concurrent_foreign_audit_creation_is_not_overwritten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    original = write_backup_cleanup_audit
+
+    def create_foreign(
+        path: Path,
+        audit: BackupCleanupAudit,
+        *,
+        expected_output: BackupCleanupAuditOutputState,
+    ) -> None:
+        path.write_bytes(b"concurrent foreign report")
+        original(path, audit, expected_output=expected_output)
+
+    monkeypatch.setattr(cli, "write_backup_cleanup_audit", create_foreign)
+
+    assert _run_lifecycle(paths) == 2
+    assert paths[4].read_bytes() == b"concurrent foreign report"
+    assert not list(paths[4].parent.glob(f".{paths[4].name}.*.tmp"))
+    assert not (paths[0] / _session_name("alpha")).exists()
+
+
+def test_concurrent_valid_audit_replacement_is_not_overwritten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    existing = BackupCleanupAudit("1" * 64, "2" * 64, "3" * 64, ())
+    write_backup_cleanup_audit(
+        paths[4],
+        existing,
+        expected_output=BackupCleanupAuditOutputState(None, None),
+    )
+    concurrent = BackupCleanupAudit("4" * 64, "5" * 64, "6" * 64, ())
+    concurrent_bytes = (
+        json.dumps(concurrent.payload(), ensure_ascii=False, indent=2) + "\n"
+    ).encode()
+    original = write_backup_cleanup_audit
+
+    def replace_valid(
+        path: Path,
+        audit: BackupCleanupAudit,
+        *,
+        expected_output: BackupCleanupAuditOutputState,
+    ) -> None:
+        path.write_bytes(concurrent_bytes)
+        original(path, audit, expected_output=expected_output)
+
+    monkeypatch.setattr(cli, "write_backup_cleanup_audit", replace_valid)
+
+    assert _run_lifecycle(paths) == 2
+    assert paths[4].read_bytes() == concurrent_bytes
+    assert not list(paths[4].parent.glob(f".{paths[4].name}.*.tmp"))
+    assert not (paths[0] / _session_name("alpha")).exists()
 
 
 def test_console_and_audit_do_not_expose_absolute_paths_or_tracebacks(

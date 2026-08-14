@@ -181,7 +181,13 @@ def test_backup_cleanup_execute_help_describes_bound_inputs(capsys: object) -> N
 
     assert exc_info.value.code == 0
     help_text = capsys.readouterr().out  # type: ignore[attr-defined]
-    for option in ("--inventory", "--plan", "--approval", "--report-json"):
+    for option in (
+        "--package-root",
+        "--inventory",
+        "--plan",
+        "--approval",
+        "--report-json",
+    ):
         assert option in help_text
 
 

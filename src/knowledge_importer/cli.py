@@ -28,8 +28,8 @@ from knowledge_importer.backup_cleanup_approval import (
 )
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupExecutionInputError,
+    capture_backup_cleanup_audit_output,
     execute_backup_cleanup,
-    is_backup_cleanup_audit_report,
     write_backup_cleanup_audit,
 )
 from knowledge_importer.backup_cleanup_plan import (
@@ -479,6 +479,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="BACKUP_ROOT",
         help="cleanupするmanaged backup root",
+    )
+    backup_cleanup_execute_parser.add_argument(
+        "--package-root",
+        type=Path,
+        metavar="PACKAGE_ROOT",
+        required=True,
+        help="変更禁止のKnowledge Package root",
     )
     for option, metavar, help_text in (
         ("--inventory", "INVENTORY_JSON", "binding済みBackup Inventory v1"),
@@ -943,6 +950,7 @@ def _run_backup_cleanup_approval(
 def _run_backup_cleanup_execution(
     backup_root: Path,
     *,
+    package_root: Path,
     inventory_path: Path,
     plan_path: Path,
     approval_path: Path,
@@ -952,16 +960,20 @@ def _run_backup_cleanup_execution(
     if not all(
         _cleanup_lifecycle_paths_are_safe(backup_root, input_path, report_json)
         for input_path in inputs
-    ) or len({_path_comparison_key(path) for path in inputs}) != len(inputs):
+    ) or (
+        len({_path_comparison_key(path) for path in inputs}) != len(inputs)
+        or path_is_within(report_json, package_root)
+    ):
         print("エラー: Cleanup Executionの入力または出力先を安全に検証できません", file=sys.stderr)
         return 2
-    if (report_json.exists() or report_json.is_symlink()) and not is_backup_cleanup_audit_report(
-        report_json
-    ):
+    try:
+        audit_output_state = capture_backup_cleanup_audit_output(report_json)
+    except (OSError, ValueError):
         print("エラー: 既存のBackup Cleanup Audit以外は上書きできません", file=sys.stderr)
         return 2
     try:
         audit = execute_backup_cleanup(
+            package_root,
             backup_root,
             inventory_path=inventory_path,
             plan_path=plan_path,
@@ -978,7 +990,11 @@ def _run_backup_cleanup_execution(
     for action in audit.actions:
         print(f"Cleanup実行: session={action.session} status={action.status.value}")
     try:
-        write_backup_cleanup_audit(report_json, audit)
+        write_backup_cleanup_audit(
+            report_json,
+            audit,
+            expected_output=audit_output_state,
+        )
     except Exception as exc:  # noqa: BLE001 - deletion is never rolled back for report failure.
         LOGGER.error("backup_cleanup_audit_write_failed exception_type=%s", type(exc).__name__)
         print("Cleanup Auditを書き込めませんでした。", file=sys.stderr)
@@ -1055,6 +1071,7 @@ def run(
     if args.command == "backup-cleanup-execute":
         return _run_backup_cleanup_execution(
             args.backup_root,
+            package_root=args.package_root,
             inventory_path=args.inventory,
             plan_path=args.plan,
             approval_path=args.approval,
