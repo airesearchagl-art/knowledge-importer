@@ -17,6 +17,11 @@ from knowledge_importer.artifact_manifest import (
     digest_file,
     write_artifact_manifest,
 )
+from knowledge_importer.backup_inventory import (
+    SESSION_MANIFEST_FILENAME,
+    BackupSessionState,
+    parse_backup_session_manifest_bytes,
+)
 from knowledge_importer.document_metadata import (
     DocumentMetadataSettings,
     build_document_metadata,
@@ -217,9 +222,15 @@ def test_explicit_backup_contains_identical_stale_sidecar(
     )
 
     backups = tuple(backup_dir.rglob("*.bak"))
+    session_manifests = tuple(backup_dir.rglob(SESSION_MANIFEST_FILENAME))
     assert report.exit_code == 0
     assert len(backups) == 1
     assert backups[0].read_bytes() == expected
+    assert len(session_manifests) == 1
+    session_manifest = parse_backup_session_manifest_bytes(session_manifests[0].read_bytes())
+    assert session_manifest.state is BackupSessionState.COMPLETE
+    assert session_manifest.items[0].source == "section/a.metadata.json"
+    assert session_manifest.items[0].digest == digest_file(backups[0])
 
 
 @pytest.mark.parametrize("change", ["sidecar", "markdown", "manifest"])
@@ -443,6 +454,161 @@ def test_delete_failure_keeps_target(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert sidecar.read_bytes() == before
 
 
+def test_session_manifest_failure_does_not_delete_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    succeeded = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    sidecar = _sidecar(root, succeeded)
+    before = sidecar.read_bytes()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(succeeded),))
+    backup_root = tmp_path / "backup-root"
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
+    original_writer = execution.write_backup_session_manifest
+    calls = 0
+
+    def fail_item_record(path: Path, session: object, *, expected_current: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("synthetic manifest update failure")
+        original_writer(path, session, expected_current=expected_current)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution, "write_backup_session_manifest", fail_item_record)
+
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+        backup_dir=backup_root,
+    )
+
+    session_manifest_path = next(backup_root.rglob(SESSION_MANIFEST_FILENAME))
+    session_manifest = parse_backup_session_manifest_bytes(session_manifest_path.read_bytes())
+    assert report.exit_code == 1
+    assert sidecar.read_bytes() == before
+    assert session_manifest.state is BackupSessionState.OPEN
+    assert session_manifest.items == ()
+
+
+def test_multi_action_session_manifest_is_updated_atomically_and_deterministically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    first = _item(root, "a/first.md", status=ManifestStatus.SUCCEEDED)
+    second = _item(root, "z/second.md", status=ManifestStatus.SUCCEEDED)
+    first_sidecar = _sidecar(root, first)
+    second_sidecar = _sidecar(root, second)
+    manifest, plan, approval, preflight = _contract(
+        tmp_path,
+        root,
+        (_failed(second), _failed(first)),
+    )
+    backup_root = tmp_path / "backup-root"
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
+
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+        backup_dir=backup_root,
+    )
+
+    session_manifest_path = next(backup_root.rglob(SESSION_MANIFEST_FILENAME))
+    content = session_manifest_path.read_bytes()
+    session_manifest = parse_backup_session_manifest_bytes(content)
+    assert report.exit_code == 0
+    assert not first_sidecar.exists()
+    assert not second_sidecar.exists()
+    assert session_manifest.state is BackupSessionState.COMPLETE
+    assert [item.source for item in session_manifest.items] == [
+        "a/first.metadata.json",
+        "z/second.metadata.json",
+    ]
+    assert content.endswith(b"\n")
+
+
+def test_backup_item_is_recorded_before_target_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    succeeded = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    sidecar = _sidecar(root, succeeded)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(succeeded),))
+    backup_root = tmp_path / "backup-root"
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
+    original_delete = execution._delete_target
+
+    def assert_manifest_then_delete(target: Path) -> None:
+        session_manifest = parse_backup_session_manifest_bytes(
+            next(backup_root.rglob(SESSION_MANIFEST_FILENAME)).read_bytes()
+        )
+        assert session_manifest.state is BackupSessionState.OPEN
+        assert [item.source for item in session_manifest.items] == ["section/a.metadata.json"]
+        original_delete(target)
+
+    monkeypatch.setattr(execution, "_delete_target", assert_manifest_then_delete)
+
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+        backup_dir=backup_root,
+    )
+
+    assert report.exit_code == 0
+    assert not sidecar.exists()
+
+
+def test_complete_state_write_failure_rolls_back_deleted_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    succeeded = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    sidecar = _sidecar(root, succeeded)
+    before = sidecar.read_bytes()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(succeeded),))
+    backup_root = tmp_path / "backup-root"
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
+    original_writer = execution.write_backup_session_manifest
+
+    def reject_complete(
+        path: Path,
+        session: object,
+        *,
+        expected_current: object,
+    ) -> None:
+        if getattr(session, "state", None) is BackupSessionState.COMPLETE:
+            raise OSError("synthetic completion failure")
+        original_writer(path, session, expected_current=expected_current)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution, "write_backup_session_manifest", reject_complete)
+
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+        backup_dir=backup_root,
+    )
+
+    session_manifest = parse_backup_session_manifest_bytes(
+        next(backup_root.rglob(SESSION_MANIFEST_FILENAME)).read_bytes()
+    )
+    assert report.exit_code == 1
+    assert report.post_validation == "failed"
+    assert sidecar.read_bytes() == before
+    assert report.actions[0].status == "rolled-back"
+    assert session_manifest.state is BackupSessionState.ROLLED_BACK
+
+
 def test_regenerated_sidecar_rolls_back_and_later_action_is_not_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -550,6 +716,8 @@ def test_removed_stale_sidecar_is_restored_when_later_action_fails(
     manifest, plan, approval, preflight = _contract(
         tmp_path, root, (_failed(stale_source), missing)
     )
+    backup_root = tmp_path / "backup-root"
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
     monkeypatch.setattr(
         execution,
         "_write_new_sidecar",
@@ -562,11 +730,16 @@ def test_removed_stale_sidecar_is_restored_when_later_action_fails(
         plan_path=plan,
         approval_path=approval,
         preflight_path=preflight,
+        backup_dir=backup_root,
     )
 
+    session_manifest = parse_backup_session_manifest_bytes(
+        next(backup_root.rglob(SESSION_MANIFEST_FILENAME)).read_bytes()
+    )
     assert report.exit_code == 1
     assert stale.read_bytes() == stale_bytes
     assert [action.status for action in report.actions] == ["rolled-back", "failed"]
+    assert session_manifest.state is BackupSessionState.ROLLED_BACK
 
 
 def test_rollback_does_not_overwrite_external_target(
@@ -579,6 +752,8 @@ def test_rollback_does_not_overwrite_external_target(
     manifest, plan, approval, preflight = _contract(
         tmp_path, root, (_failed(stale_source), missing)
     )
+    backup_root = tmp_path / "backup-root"
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
 
     def conflict_then_fail(path: Path, sidecar: object) -> None:
         stale.write_text("external\n", encoding="utf-8")
@@ -591,11 +766,16 @@ def test_rollback_does_not_overwrite_external_target(
         plan_path=plan,
         approval_path=approval,
         preflight_path=preflight,
+        backup_dir=backup_root,
     )
 
+    session_manifest = parse_backup_session_manifest_bytes(
+        next(backup_root.rglob(SESSION_MANIFEST_FILENAME)).read_bytes()
+    )
     assert report.exit_code == 1
     assert stale.read_text(encoding="utf-8") == "external\n"
     assert report.actions[0].status == "rollback-failed"
+    assert session_manifest.state is BackupSessionState.ROLLBACK_FAILED
 
 
 def test_rollback_restore_does_not_clobber_target_created_at_publish(

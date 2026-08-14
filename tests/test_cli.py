@@ -75,6 +75,7 @@ def test_help_describes_convert_command() -> None:
     assert "validate" in help_text
     assert "repair-plan" in help_text
     assert "approve-repair" in help_text
+    assert "backup-inventory" in help_text
     assert "knowledge-importer" in help_text
 
 
@@ -133,6 +134,13 @@ def test_approve_repair_help_describes_human_gate_options(capsys: object) -> Non
 def test_approve_repair_requires_explicit_all_safe_scope() -> None:
     with pytest.raises(SystemExit) as exc_info:
         build_parser().parse_args(["approve-repair", "plan.json", "--report-json", "approval.json"])
+
+    assert exc_info.value.code == 2
+
+
+def test_backup_inventory_requires_explicit_package_root() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["backup-inventory", "backups"])
 
     assert exc_info.value.code == 2
 

@@ -445,3 +445,72 @@ v1は決定的な順序で逐次実行し、最初の失敗で停止して後続
 action statusは`succeeded`、`failed-precondition`、`failed`、`rolled-back`、`rollback-failed`、`not-run`、rollback statusは`not-required`、`available`、`completed`、`failed`です。終了コードは完全成功または0 actionが`0`、TOCTOU・mutation・post-validation・rollback関連失敗が`1`、input・schema・binding・output protection・report write errorが`2`です。
 
 Execution Reportは共通atomic writerで出力し、有効なExecution Report v1自身だけ更新できます。Report書込みはpackage mutation完了後の独立処理であり、書込み失敗だけを理由にpackageをrollbackしません。timestamp、hostname、username、cwd、command line、absolute path、backup path、tracebackを含めません。
+
+## Backup Session Manifest v1
+
+`remove-stale-sidecar`を含むRepair Executionは、package rootおよび検出可能なGit repository外のbackup rootへ`knowledge-importer-repair-v1-*` sessionを排他的に作成します。固定filenameは`session-manifest.json`です。Repair Plan、Approval、Preflight、Execution Report、Artifact Manifest、Metadata Sidecarの既存schemaは変更しません。
+
+```json
+{
+  "report_type": "knowledge-importer-repair-backup-session",
+  "schema_version": 1,
+  "state": "complete",
+  "bindings": {
+    "manifest": {"sha256": "1111111111111111111111111111111111111111111111111111111111111111", "schema_version": 1},
+    "plan": {"sha256": "2222222222222222222222222222222222222222222222222222222222222222", "schema_version": 1},
+    "approval": {"sha256": "3333333333333333333333333333333333333333333333333333333333333333", "schema_version": 1},
+    "preflight": {"sha256": "4444444444444444444444444444444444444444444444444444444444444444", "schema_version": 1}
+  },
+  "items": [
+    {
+      "source": "section/a.metadata.json",
+      "backup": "0000/section/a.metadata.json.bak",
+      "bytes": 123,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    }
+  ]
+}
+```
+
+state transitionは`open → complete | rolled-back | rollback-failed`だけです。session作成直後に`open`を書き、backup作成・source digest一致後かつtarget削除前にitemをatomic追記します。既存session manifestがvalidなv1で現在の期待bytesと一致しなければ更新しません。item記録失敗時はtargetを削除しません。`complete`は全actionとpost-validation成功後だけ記録します。crash、interruption、完了状態の記録不能では`open`が残ります。
+
+managed treeはsession manifest、宣言済みregular backup file、その親directoryだけです。relative POSIX path、lowercase 64桁SHA-256、nonnegative bytes、source・backup pathの一意性、`NNNN/<source>.bak`対応を必須にします。未宣言entry、symlink、junction／reparse point、absolute path、`..`、session escapeは許可しません。
+
+## Backup Inventory v1
+
+`knowledge-importer backup-inventory BACKUP_ROOT --package-root PACKAGE_ROOT [--report-json PATH]`はbackup rootを変更しないread-only commandです。`--package-root`を明示させ、backup rootとpackage／Git repositoryの重なりを拒否します。backup root、intermediate directory、session、manifest、backup fileのlink／reparse pointを追跡しません。
+
+```json
+{
+  "report_type": "knowledge-importer-backup-inventory",
+  "schema_version": 1,
+  "summary": {
+    "sessions": 1,
+    "managed": 1,
+    "orphaned": 0,
+    "legacy_unmanaged": 0,
+    "planning_eligible": 1,
+    "backup_files": 1,
+    "backup_bytes": 123
+  },
+  "sessions": [
+    {
+      "session": "knowledge-importer-repair-v1-example",
+      "classification": "managed",
+      "state": "complete",
+      "planning_eligible": true,
+      "session_manifest_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "tree_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "items": []
+    }
+  ]
+}
+```
+
+sessionとitemはNFC正規化・casefoldを基準に固定順で出力します。`tree_sha256`はsession manifestを含む宣言fileをrelative path順に並べ、record type、UTF-8 path長、path bytes、content長、content bytesを曖昧性のないlength-prefix形式でhashします。同じfilesystem stateから同じUTF-8、2-space indent、trailing newlineのJSON bytesを生成します。
+
+分類は`managed`、`missing-session-manifest`、`invalid-session-manifest`、`interrupted-open-session`、`unexpected-entry`、`binding-unverifiable`、`legacy-unmanaged`です。従来の`knowledge-importer-repair-*` sessionは自動移行せず`legacy-unmanaged`です。`planning_eligible=true`はvalidな`complete` sessionだけで、`open`、`rolled-back`、`rollback-failed`、orphan、invalid、legacyはblocked寄りに扱います。このfieldはcleanup permissionではありません。
+
+Inventory reportはbackup root配下へ置けず、有効なBackup Inventory v1自身だけatomic更新できます。timestamp、hostname、username、cwd、command line、absolute path、tracebackを含めません。cleanup plan、cleanup approval、cleanup audit、cleanup execution、unlink、rmdir、rmtree、自動cleanup、age／size／generation retentionは未実装です。
+
+終了コードは健全なmanaged sessionだけ（0 sessionを含む）なら`0`、interrupted、rollback failure、invalid、orphan、legacy-unmanaged検出時は`1`、CLI・root safety・report protection／write errorは`2`です。

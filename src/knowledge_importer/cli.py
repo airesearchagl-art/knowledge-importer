@@ -21,6 +21,14 @@ from knowledge_importer.artifact_manifest import (
     build_manifest_item,
     write_artifact_manifest,
 )
+from knowledge_importer.backup_inventory import (
+    BackupInventoryInputError,
+    build_backup_inventory,
+    is_backup_inventory_report,
+    path_is_within,
+    path_uses_link_or_reparse,
+    write_backup_inventory,
+)
 from knowledge_importer.converter import (
     Converter,
     build_docling_converter,
@@ -361,6 +369,29 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BACKUP_DIR",
         help="package・repository外のbackup保存先",
     )
+    backup_inventory_parser = subparsers.add_parser(
+        "backup-inventory",
+        help="Repair Execution backup rootをread-only検査",
+    )
+    backup_inventory_parser.add_argument(
+        "backup_root",
+        type=Path,
+        metavar="BACKUP_ROOT",
+        help="検査するbackup root",
+    )
+    backup_inventory_parser.add_argument(
+        "--package-root",
+        type=Path,
+        metavar="PACKAGE_ROOT",
+        required=True,
+        help="backup領域外であることを検証するKnowledge Package root",
+    )
+    backup_inventory_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        help="決定的なBackup Inventory JSONの出力先",
+    )
     return parser
 
 
@@ -658,6 +689,59 @@ def _run_repair_execution(
     return report.exit_code
 
 
+def _run_backup_inventory(
+    backup_root: Path,
+    *,
+    package_root: Path,
+    report_json: Path | None,
+) -> int:
+    if report_json is not None and (
+        path_is_within(report_json, backup_root) or path_uses_link_or_reparse(report_json)
+    ):
+        print("エラー: Inventory Reportはbackup root外へ出力してください", file=sys.stderr)
+        return 2
+    if (
+        report_json is not None
+        and (report_json.exists() or report_json.is_symlink())
+        and not is_backup_inventory_report(report_json)
+    ):
+        print("エラー: 既存のBackup Inventory以外は上書きできません", file=sys.stderr)
+        return 2
+    try:
+        inventory = build_backup_inventory(package_root, backup_root)
+    except BackupInventoryInputError as exc:
+        LOGGER.error("backup_inventory_invalid exception_type=%s", type(exc).__name__)
+        print("Backup Inventoryの入力を安全に検証できませんでした。", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - local paths remain sanitized.
+        LOGGER.error("backup_inventory_failed exception_type=%s", type(exc).__name__)
+        print("Backup Inventoryを生成できませんでした。", file=sys.stderr)
+        return 2
+
+    for session in inventory.sessions:
+        print(
+            f"Backup session: session={session.session} "
+            f"分類={session.classification.value} "
+            f"planning_eligible={str(session.planning_eligible).lower()}"
+        )
+    summary = inventory.payload()["summary"]
+    assert isinstance(summary, dict)
+    print(
+        "Backup Inventory: "
+        f"session={summary['sessions']} managed={summary['managed']} "
+        f"orphan={summary['orphaned']} legacy={summary['legacy_unmanaged']} "
+        f"planning_eligible={summary['planning_eligible']}"
+    )
+    if report_json is not None:
+        try:
+            write_backup_inventory(report_json, inventory)
+        except Exception as exc:  # noqa: BLE001 - report failures map to exit code 2.
+            LOGGER.error("backup_inventory_write_failed exception_type=%s", type(exc).__name__)
+            print("Backup Inventory Reportを書き込めませんでした。", file=sys.stderr)
+            return 2
+    return inventory.exit_code
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -697,6 +781,12 @@ def run(
             preflight_path=args.preflight,
             report_json=args.report_json,
             backup_dir=args.backup_dir,
+        )
+    if args.command == "backup-inventory":
+        return _run_backup_inventory(
+            args.backup_root,
+            package_root=args.package_root,
+            report_json=args.report_json,
         )
     if (
         args.normalize_markdown is not None

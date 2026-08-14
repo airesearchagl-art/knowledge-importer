@@ -18,6 +18,17 @@ from knowledge_importer.artifact_manifest import (
     ManifestStatus,
     digest_file,
 )
+from knowledge_importer.backup_inventory import (
+    MANAGED_SESSION_PREFIX,
+    SESSION_MANIFEST_FILENAME,
+    BackupSessionBindings,
+    BackupSessionItem,
+    BackupSessionManifest,
+    BackupSessionState,
+    is_link_or_reparse,
+    transition_backup_session,
+    write_backup_session_manifest,
+)
 from knowledge_importer.document_metadata import (
     DocumentMetadataSettings,
     DocumentMetadataSidecar,
@@ -112,6 +123,7 @@ class RepairExecutionReport:
 
 @dataclass(frozen=True, slots=True)
 class _ExecutionInputs:
+    manifest_sha256: str
     plan_sha256: str
     approval_sha256: str
     preflight_sha256: str
@@ -128,6 +140,13 @@ class _AppliedAction:
     backup_digest: ArtifactDigest | None
 
 
+@dataclass(slots=True)
+class _BackupSessionContext:
+    root: Path
+    manifest_path: Path
+    manifest: BackupSessionManifest
+
+
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -141,7 +160,7 @@ def _state_payload(state: PreflightTarget) -> dict[str, object]:
 
 
 def _is_link(path: Path) -> bool:
-    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+    return is_link_or_reparse(path)
 
 
 def _resolve_target(root: Path, relative_path: str) -> Path | None:
@@ -189,7 +208,9 @@ def _read_and_bind_inputs(
     preflight_path: Path,
 ) -> _ExecutionInputs:
     try:
+        manifest_digest_before = digest_file(manifest_path)
         manifest = read_manifest_state(manifest_path)
+        manifest_digest_after = digest_file(manifest_path)
         plan_content = plan_path.read_bytes()
         approval_content = approval_path.read_bytes()
         preflight_content = preflight_path.read_bytes()
@@ -198,6 +219,9 @@ def _read_and_bind_inputs(
         preflight = parse_repair_preflight_bytes(preflight_content)
     except (OSError, ValueError) as exc:
         raise RepairExecutionInputError("invalid execution input") from exc
+
+    if manifest_digest_before != manifest_digest_after or manifest_digest_before.sha256 is None:
+        raise RepairExecutionInputError("Manifest changed while binding execution")
 
     plan_sha256 = _sha256(plan_content)
     approval_sha256 = _sha256(approval_content)
@@ -225,6 +249,7 @@ def _read_and_bind_inputs(
     for action in preflight_actions:
         _find_record(manifest, action)
     return _ExecutionInputs(
+        manifest_digest_before.sha256,
         plan_sha256,
         approval_sha256,
         preflight_sha256,
@@ -291,7 +316,7 @@ def _prepare_backup_session(package_root: Path, backup_dir: Path | None) -> Path
     if any(resolved == item or resolved.is_relative_to(item) for item in forbidden):
         raise OSError("backup directory must be outside package and repository")
     _ensure_directory_without_links(root)
-    session = Path(tempfile.mkdtemp(prefix="knowledge-importer-repair-", dir=root))
+    session = Path(tempfile.mkdtemp(prefix=MANAGED_SESSION_PREFIX, dir=root))
     if _is_link(session) or session.parent.resolve() != root.resolve():
         raise OSError("unsafe backup session")
     return session
@@ -328,6 +353,57 @@ def _backup_target(target: Path, backup_path: Path, session_root: Path) -> Artif
                 backup_path.unlink()
         raise
     return backup_digest
+
+
+def _start_backup_session(root: Path, inputs: _ExecutionInputs) -> _BackupSessionContext:
+    manifest = BackupSessionManifest(
+        BackupSessionState.OPEN,
+        BackupSessionBindings(
+            inputs.manifest_sha256,
+            inputs.plan_sha256,
+            inputs.approval_sha256,
+            inputs.preflight_sha256,
+        ),
+        (),
+    )
+    path = root / SESSION_MANIFEST_FILENAME
+    write_backup_session_manifest(path, manifest, expected_current=None)
+    return _BackupSessionContext(root, path, manifest)
+
+
+def _record_backup(
+    context: _BackupSessionContext,
+    *,
+    source: str,
+    backup_path: Path,
+    digest: ArtifactDigest,
+) -> None:
+    relative_backup = backup_path.relative_to(context.root).as_posix()
+    item = BackupSessionItem(source, relative_backup, digest)
+    updated = BackupSessionManifest(
+        context.manifest.state,
+        context.manifest.bindings,
+        tuple(sorted((*context.manifest.items, item), key=lambda value: value.backup)),
+    )
+    write_backup_session_manifest(
+        context.manifest_path,
+        updated,
+        expected_current=context.manifest,
+    )
+    context.manifest = updated
+
+
+def _set_backup_session_state(
+    context: _BackupSessionContext,
+    state: BackupSessionState,
+) -> None:
+    updated = transition_backup_session(context.manifest, state)
+    write_backup_session_manifest(
+        context.manifest_path,
+        updated,
+        expected_current=context.manifest,
+    )
+    context.manifest = updated
 
 
 def _delete_target(target: Path) -> None:
@@ -441,6 +517,21 @@ def _rollback(applied: list[_AppliedAction]) -> bool:
     return all_succeeded
 
 
+def _rollback_with_session(
+    applied: list[_AppliedAction],
+    backup_session: _BackupSessionContext | None,
+) -> bool:
+    succeeded = _rollback(applied)
+    if backup_session is None or not applied:
+        return succeeded
+    state = BackupSessionState.ROLLED_BACK if succeeded else BackupSessionState.ROLLBACK_FAILED
+    try:
+        _set_backup_session_state(backup_session, state)
+    except Exception:  # noqa: BLE001 - an open session remains visible to inventory.
+        return False
+    return succeeded
+
+
 def _not_run_results(preflight: RepairPreflight) -> list[ExecutionActionResult]:
     return [
         ExecutionActionResult(
@@ -513,9 +604,11 @@ def execute_repair(
         for action in inputs.preflight.actions
     )
     backup_root: Path | None = None
+    backup_session: _BackupSessionContext | None = None
     if needs_backup:
         try:
             backup_root = _prepare_backup_session(package_root, backup_dir)
+            backup_session = _start_backup_session(backup_root, inputs)
         except Exception:  # noqa: BLE001 - unsafe/colliding destination is action failure.
             first_stale = next(
                 index
@@ -541,7 +634,7 @@ def execute_repair(
             )
         except Exception:  # noqa: BLE001 - fail-fast and rollback on unverifiable state.
             results[index].status = "failed-precondition"
-            _rollback(applied)
+            _rollback_with_session(applied, backup_session)
             return RepairExecutionReport(
                 inputs.plan_sha256,
                 inputs.approval_sha256,
@@ -551,7 +644,7 @@ def execute_repair(
             )
         if not _precondition_matches(submitted, current):
             results[index].status = "failed-precondition"
-            _rollback(applied)
+            _rollback_with_session(applied, backup_session)
             return RepairExecutionReport(
                 inputs.plan_sha256,
                 inputs.approval_sha256,
@@ -564,7 +657,7 @@ def execute_repair(
         target = _resolve_target(package_root, action.path)
         if target is None:
             results[index].status = "failed-precondition"
-            _rollback(applied)
+            _rollback_with_session(applied, backup_session)
             return RepairExecutionReport(
                 inputs.plan_sha256,
                 inputs.approval_sha256,
@@ -581,10 +674,17 @@ def execute_repair(
                 applied.append(_AppliedAction(results[index], target, applied_digest, None, None))
             else:
                 assert backup_root is not None
+                assert backup_session is not None
                 backup_path = backup_root / f"{index:04d}" / f"{action.path}.bak"
                 backup_digest = _backup_target(target, backup_path, backup_root)
                 if backup_digest.sha256 != submitted.target.sha256:
                     raise OSError("backup no longer matches preflight")
+                _record_backup(
+                    backup_session,
+                    source=action.path,
+                    backup_path=backup_path,
+                    digest=backup_digest,
+                )
                 try:
                     _delete_target(target)
                 except Exception:
@@ -600,7 +700,7 @@ def execute_repair(
                 )
         except Exception:  # noqa: BLE001 - safe report status replaces local exception details.
             results[index].status = "failed"
-            _rollback(applied)
+            _rollback_with_session(applied, backup_session)
             results[index].after = _target_state(target, action.path)
             return RepairExecutionReport(
                 inputs.plan_sha256,
@@ -619,7 +719,7 @@ def execute_repair(
     except Exception:  # noqa: BLE001 - post-state must be provably valid.
         post_validation_failed = True
     if post_validation_failed:
-        _rollback(applied)
+        _rollback_with_session(applied, backup_session)
         return RepairExecutionReport(
             inputs.plan_sha256,
             inputs.approval_sha256,
@@ -627,6 +727,18 @@ def execute_repair(
             tuple(results),
             "failed",
         )
+    if backup_session is not None:
+        try:
+            _set_backup_session_state(backup_session, BackupSessionState.COMPLETE)
+        except Exception:  # noqa: BLE001 - completion must be durably recorded.
+            _rollback_with_session(applied, backup_session)
+            return RepairExecutionReport(
+                inputs.plan_sha256,
+                inputs.approval_sha256,
+                inputs.preflight_sha256,
+                tuple(results),
+                "failed",
+            )
     return RepairExecutionReport(
         inputs.plan_sha256,
         inputs.approval_sha256,
