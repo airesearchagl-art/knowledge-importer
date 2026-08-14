@@ -28,8 +28,8 @@ from knowledge_importer.backup_cleanup_approval import (
 )
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupExecutionInputError,
-    capture_backup_cleanup_audit_output,
     execute_backup_cleanup,
+    validate_backup_cleanup_audit_output_path,
     write_backup_cleanup_audit,
 )
 from knowledge_importer.backup_cleanup_plan import (
@@ -504,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="AUDIT_JSON",
         required=True,
-        help="決定的なCleanup Audit v1の出力先",
+        help="新規pathへcreate-onlyで作成するCleanup Audit v1",
     )
     return parser
 
@@ -967,9 +967,9 @@ def _run_backup_cleanup_execution(
         print("エラー: Cleanup Executionの入力または出力先を安全に検証できません", file=sys.stderr)
         return 2
     try:
-        audit_output_state = capture_backup_cleanup_audit_output(report_json)
+        validate_backup_cleanup_audit_output_path(report_json)
     except (OSError, ValueError):
-        print("エラー: 既存のBackup Cleanup Audit以外は上書きできません", file=sys.stderr)
+        print("エラー: Cleanup Auditの出力先は新規pathを指定してください", file=sys.stderr)
         return 2
     try:
         audit = execute_backup_cleanup(
@@ -990,11 +990,7 @@ def _run_backup_cleanup_execution(
     for action in audit.actions:
         print(f"Cleanup実行: session={action.session} status={action.status.value}")
     try:
-        write_backup_cleanup_audit(
-            report_json,
-            audit,
-            expected_output=audit_output_state,
-        )
+        write_backup_cleanup_audit(report_json, audit)
     except Exception as exc:  # noqa: BLE001 - deletion is never rolled back for report failure.
         LOGGER.error("backup_cleanup_audit_write_failed exception_type=%s", type(exc).__name__)
         print("Cleanup Auditを書き込めませんでした。", file=sys.stderr)

@@ -17,7 +17,6 @@ from knowledge_importer.backup_cleanup_approval import (
 )
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAudit,
-    BackupCleanupAuditOutputState,
     BackupCleanupAuditStatus,
     parse_backup_cleanup_audit_bytes,
     write_backup_cleanup_audit,
@@ -443,7 +442,7 @@ def test_audit_write_failure_does_not_restore_deleted_session(
 ) -> None:
     paths = _lifecycle(tmp_path)
 
-    def fail_write(path: Path, audit: object, *, expected_output: object) -> None:
+    def fail_write(path: Path, audit: object) -> None:
         raise OSError("synthetic report failure")
 
     monkeypatch.setattr(cli, "write_backup_cleanup_audit", fail_write)
@@ -456,6 +455,59 @@ def test_audit_write_failure_does_not_restore_deleted_session(
 def test_foreign_audit_is_preserved_and_execution_does_not_start(tmp_path: Path) -> None:
     paths = _lifecycle(tmp_path)
     paths[4].write_bytes(b"foreign report")
+
+    assert _run_lifecycle(paths) == 2
+    assert paths[4].read_bytes() == b"foreign report"
+    assert (paths[0] / _session_name("alpha")).exists()
+
+
+def test_existing_valid_audit_is_rejected_before_execution(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    existing = BackupCleanupAudit("1" * 64, "2" * 64, "3" * 64, ())
+    write_backup_cleanup_audit(paths[4], existing)
+    before = paths[4].read_bytes()
+
+    assert _run_lifecycle(paths) == 2
+    assert paths[4].read_bytes() == before
+    assert (paths[0] / _session_name("alpha")).exists()
+
+
+def test_existing_audit_directory_is_rejected_before_execution(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    paths[4].mkdir()
+
+    assert _run_lifecycle(paths) == 2
+    assert paths[4].is_dir()
+    assert (paths[0] / _session_name("alpha")).exists()
+
+
+def test_existing_audit_symlink_is_rejected_without_following_target(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    target = tmp_path / "foreign-audit.json"
+    target.write_bytes(b"foreign report")
+    try:
+        paths[4].symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+
+    assert _run_lifecycle(paths) == 2
+    assert target.read_bytes() == b"foreign report"
+    assert paths[4].is_symlink()
+    assert (paths[0] / _session_name("alpha")).exists()
+
+
+def test_existing_audit_reparse_is_rejected_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    paths[4].write_bytes(b"foreign report")
+    original = cli.path_uses_link_or_reparse
+    monkeypatch.setattr(
+        cli,
+        "path_uses_link_or_reparse",
+        lambda path: path == paths[4] or original(path),
+    )
 
     assert _run_lifecycle(paths) == 2
     assert paths[4].read_bytes() == b"foreign report"
@@ -624,55 +676,22 @@ def test_concurrent_foreign_audit_creation_is_not_overwritten(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = _lifecycle(tmp_path)
-    original = write_backup_cleanup_audit
+    original_link = execution.os.link
+    concurrent = b"concurrent foreign report"
 
-    def create_foreign(
-        path: Path,
-        audit: BackupCleanupAudit,
+    def create_foreign_before_commit(
+        source: Path,
+        destination: Path,
         *,
-        expected_output: BackupCleanupAuditOutputState,
+        follow_symlinks: bool,
     ) -> None:
-        path.write_bytes(b"concurrent foreign report")
-        original(path, audit, expected_output=expected_output)
+        Path(destination).write_bytes(concurrent)
+        original_link(source, destination, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(cli, "write_backup_cleanup_audit", create_foreign)
+    monkeypatch.setattr(execution.os, "link", create_foreign_before_commit)
 
     assert _run_lifecycle(paths) == 2
-    assert paths[4].read_bytes() == b"concurrent foreign report"
-    assert not list(paths[4].parent.glob(f".{paths[4].name}.*.tmp"))
-    assert not (paths[0] / _session_name("alpha")).exists()
-
-
-def test_concurrent_valid_audit_replacement_is_not_overwritten(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = _lifecycle(tmp_path)
-    existing = BackupCleanupAudit("1" * 64, "2" * 64, "3" * 64, ())
-    write_backup_cleanup_audit(
-        paths[4],
-        existing,
-        expected_output=BackupCleanupAuditOutputState(None, None),
-    )
-    concurrent = BackupCleanupAudit("4" * 64, "5" * 64, "6" * 64, ())
-    concurrent_bytes = (
-        json.dumps(concurrent.payload(), ensure_ascii=False, indent=2) + "\n"
-    ).encode()
-    original = write_backup_cleanup_audit
-
-    def replace_valid(
-        path: Path,
-        audit: BackupCleanupAudit,
-        *,
-        expected_output: BackupCleanupAuditOutputState,
-    ) -> None:
-        path.write_bytes(concurrent_bytes)
-        original(path, audit, expected_output=expected_output)
-
-    monkeypatch.setattr(cli, "write_backup_cleanup_audit", replace_valid)
-
-    assert _run_lifecycle(paths) == 2
-    assert paths[4].read_bytes() == concurrent_bytes
+    assert paths[4].read_bytes() == concurrent
     assert not list(paths[4].parent.glob(f".{paths[4].name}.*.tmp"))
     assert not (paths[0] / _session_name("alpha")).exists()
 
@@ -704,7 +723,9 @@ def test_empty_approval_produces_empty_audit_without_deleting_blocked_session(
 
     assert _run_lifecycle(paths) == 0
     first = paths[4].read_bytes()
-    assert _run_lifecycle(paths) == 0
-    assert paths[4].read_bytes() == first
+    retry_audit = paths[4].with_name("audit-retry.json")
+    retry_paths = (*paths[:4], retry_audit, paths[5])
+    assert _run_lifecycle(retry_paths) == 0
+    assert retry_audit.read_bytes() == first
     assert _audit(paths[4]).actions == ()
     assert (paths[0] / _session_name("rolled-back")).exists()

@@ -604,4 +604,6 @@ root safety確認後にInventory、Plan、Approvalを元file実bytesから再読
 }
 ```
 
-Auditのaction順はApproval順と同じcanonical順です。statusは`deleted`、`failed`、`not-run`だけで、absolute path、username、hostname、cwd、command line、timestamp、tracebackを含めません。Auditはbackup root、package root、入力fileの外に置きます。出力先が不存在なら同一directoryのtemporary fileからhard-link commitしてno-clobber作成します。既存の有効なAudit v1を更新する場合は、削除前にcaptureした実bytesとfilesystem identityが書込み直前にも一致することを再確認してからatomic replaceします。並行して作成・差替えられたforeign fileやAuditは上書きせずreport失敗とします。全action削除成功（0 actionを含む）は`0`、precondition／TOCTOU／部分削除／filesystem deletion失敗は`1`、CLI・schema・binding・report保護／書込み失敗は`2`です。削除後のAudit書込み失敗でも復元は行いません。自動retention、automatic cleanup、age／size／generation選択は実装しません。
+Auditのaction順はApproval順と同じcanonical順です。statusは`deleted`、`failed`、`not-run`だけで、absolute path、username、hostname、cwd、command line、timestamp、tracebackを含めません。Auditはbackup root、package root、入力fileの外にある新規pathへだけ作成するimmutable execution recordです。既存のvalid Audit、foreign regular file、directory、symlink、junction／reparse point、読取り不能entryはcleanup開始前に拒否し、対象sessionを変更しません。再実行時は別のreport pathを指定します。
+
+書込みは同一directoryのtemporary fileをflush／fsyncした後、`os.link(..., follow_symlinks=False)`でcreate-only／no-clobber commitします。`Path.replace()`による既存finalの更新は行いません。cleanup後に別processがfinal pathを作成した場合、そのfileを保持してexit code `2`とし、削除済みsessionは復元しません。全action削除成功（0 actionを含む）は`0`、precondition／TOCTOU／部分削除／filesystem deletion失敗は`1`、CLI・schema・binding・report保護／書込み失敗は`2`です。自動retention、automatic cleanup、age／size／generation選択は実装しません。

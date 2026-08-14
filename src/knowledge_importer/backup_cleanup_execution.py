@@ -128,12 +128,6 @@ class _ExecutionInputs:
     actions: tuple[BackupCleanupAction, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class BackupCleanupAuditOutputState:
-    content: bytes | None
-    identity: tuple[int, int, int, int] | None
-
-
 def _comparison_key(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold()
 
@@ -694,41 +688,45 @@ def is_backup_cleanup_audit_report(path: Path) -> bool:
     """Return whether an existing regular file is a Cleanup Audit v1."""
 
     try:
-        state = capture_backup_cleanup_audit_output(path)
+        if path_uses_link_or_reparse(path):
+            return False
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            return False
+        content = read_input_bytes(path)
+        parse_backup_cleanup_audit_bytes(content)
+        after = path.lstat()
     except (OSError, ValueError):
         return False
-    return state.content is not None
+    return _stable_identity(after) == _stable_identity(before) and not path_uses_link_or_reparse(
+        path
+    )
 
 
-def capture_backup_cleanup_audit_output(path: Path) -> BackupCleanupAuditOutputState:
-    """Capture a valid existing Audit's exact bytes and stable identity."""
+def validate_backup_cleanup_audit_output_path(path: Path) -> None:
+    """Require a new, link-free path for an immutable Cleanup Audit."""
 
-    if not path.exists() and not path.is_symlink():
-        return BackupCleanupAuditOutputState(None, None)
-    if path_uses_link_or_reparse(path):
-        raise ValueError("unsafe Cleanup Audit output")
-    before = path.lstat()
-    if not stat.S_ISREG(before.st_mode):
-        raise ValueError("Cleanup Audit output is not a regular file")
-    content = read_input_bytes(path)
-    parse_backup_cleanup_audit_bytes(content)
-    after = path.lstat()
-    identity = _stable_identity(before)
-    if _stable_identity(after) != identity or path_uses_link_or_reparse(path):
-        raise ValueError("Cleanup Audit output changed")
-    return BackupCleanupAuditOutputState(content, identity)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if path_uses_link_or_reparse(path):
+            raise ValueError("unsafe Cleanup Audit output") from None
+        return
+    except OSError as exc:
+        raise ValueError("Cleanup Audit output cannot be verified") from exc
+    raise ValueError("Cleanup Audit output already exists")
 
 
 def write_backup_cleanup_audit(
     path: Path,
     audit: BackupCleanupAudit,
-    *,
-    expected_output: BackupCleanupAuditOutputState,
 ) -> None:
-    """Commit a deterministic Audit without clobbering a concurrent new file."""
+    """Create a deterministic Audit without replacing any existing entry."""
 
-    if path_uses_link_or_reparse(path):
-        raise OSError("unsafe Cleanup Audit output")
+    try:
+        validate_backup_cleanup_audit_output_path(path)
+    except ValueError as exc:
+        raise OSError("unsafe Cleanup Audit output") from exc
     path.parent.mkdir(parents=True, exist_ok=True)
     if path_uses_link_or_reparse(path.parent) or not path.parent.is_dir():
         raise OSError("unsafe Cleanup Audit output parent")
@@ -747,13 +745,7 @@ def write_backup_cleanup_audit(
             output.flush()
             os.fsync(output.fileno())
 
-        current = capture_backup_cleanup_audit_output(path)
-        if current != expected_output:
-            raise OSError("Cleanup Audit output changed")
-        if expected_output.content is None:
-            os.link(temporary, path, follow_symlinks=False)
-        else:
-            temporary.replace(path)
+        os.link(temporary, path, follow_symlinks=False)
         if read_input_bytes(path) != content:
             raise OSError("Cleanup Audit output verification failed")
     finally:
