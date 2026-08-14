@@ -76,6 +76,8 @@ def test_help_describes_convert_command() -> None:
     assert "repair-plan" in help_text
     assert "approve-repair" in help_text
     assert "backup-inventory" in help_text
+    assert "backup-cleanup-plan" in help_text
+    assert "approve-backup-cleanup" in help_text
     assert "knowledge-importer" in help_text
 
 
@@ -141,6 +143,33 @@ def test_approve_repair_requires_explicit_all_safe_scope() -> None:
 def test_backup_inventory_requires_explicit_package_root() -> None:
     with pytest.raises(SystemExit) as exc_info:
         build_parser().parse_args(["backup-inventory", "backups"])
+
+    assert exc_info.value.code == 2
+
+
+def test_backup_cleanup_plan_help_describes_explicit_policy(capsys: object) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["backup-cleanup-plan", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "--backup-root BACKUP_ROOT" in help_text
+    assert "--session SESSION" in help_text
+    assert "--report-json PATH" in help_text
+
+
+def test_backup_cleanup_approval_requires_all_planned() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(
+            [
+                "approve-backup-cleanup",
+                "plan.json",
+                "--backup-root",
+                "backups",
+                "--report-json",
+                "approval.json",
+            ]
+        )
 
     assert exc_info.value.code == 2
 

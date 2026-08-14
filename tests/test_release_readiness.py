@@ -35,6 +35,9 @@ EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/__init__.py",
     "knowledge_importer/__main__.py",
     "knowledge_importer/artifact_manifest.py",
+    "knowledge_importer/backup_cleanup_approval.py",
+    "knowledge_importer/backup_cleanup_plan.py",
+    "knowledge_importer/backup_inventory.py",
     "knowledge_importer/cli.py",
     "knowledge_importer/converter.py",
     "knowledge_importer/document_metadata.py",
@@ -167,6 +170,8 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     repair_preflight_help = _run_command([str(cli), "repair-preflight", "--help"])
     repair_execute_help = _run_command([str(cli), "repair-execute", "--help"])
     backup_inventory_help = _run_command([str(cli), "backup-inventory", "--help"])
+    backup_cleanup_plan_help = _run_command([str(cli), "backup-cleanup-plan", "--help"])
+    backup_cleanup_approval_help = _run_command([str(cli), "approve-backup-cleanup", "--help"])
     module_help = _run_command([str(python), "-m", "knowledge_importer", "--help"])
     for option in EXPECTED_OPTIONS:
         assert option in cli_help
@@ -177,6 +182,8 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "repair-preflight" in module_help
     assert "repair-execute" in module_help
     assert "backup-inventory" in module_help
+    assert "backup-cleanup-plan" in module_help
+    assert "approve-backup-cleanup" in module_help
     for option in ("--manifest", "--report-json", "--strict"):
         assert option in validate_help
         assert option in repair_plan_help
@@ -195,6 +202,10 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
         assert option in repair_execute_help
     for option in ("--package-root", "--report-json"):
         assert option in backup_inventory_help
+    for option in ("--backup-root", "--session", "--report-json"):
+        assert option in backup_cleanup_plan_help
+    for option in ("--backup-root", "--all-planned", "--report-json"):
+        assert option in backup_cleanup_approval_help
     metadata = _run_command(
         [
             str(python),
@@ -202,6 +213,8 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
             (
                 "from importlib.metadata import version; "
                 "import knowledge_importer.artifact_manifest, knowledge_importer.cli, "
+                "knowledge_importer.backup_cleanup_approval, "
+                "knowledge_importer.backup_cleanup_plan, "
                 "knowledge_importer.backup_inventory, "
                 "knowledge_importer.json_writer, "
                 "knowledge_importer.markdown_quality, knowledge_importer.package_validation, "

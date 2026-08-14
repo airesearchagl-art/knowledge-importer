@@ -21,12 +21,23 @@ from knowledge_importer.artifact_manifest import (
     build_manifest_item,
     write_artifact_manifest,
 )
+from knowledge_importer.backup_cleanup_approval import (
+    build_backup_cleanup_approval,
+    is_backup_cleanup_approval_report,
+    write_backup_cleanup_approval,
+)
+from knowledge_importer.backup_cleanup_plan import (
+    build_backup_cleanup_plan,
+    is_backup_cleanup_plan_report,
+    write_backup_cleanup_plan,
+)
 from knowledge_importer.backup_inventory import (
     BackupInventoryInputError,
     build_backup_inventory,
     is_backup_inventory_report,
     path_is_within,
     path_uses_link_or_reparse,
+    repository_roots,
     write_backup_inventory,
 )
 from knowledge_importer.converter import (
@@ -392,6 +403,67 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="決定的なBackup Inventory JSONの出力先",
     )
+    backup_cleanup_plan_parser = subparsers.add_parser(
+        "backup-cleanup-plan",
+        help="Backup Inventoryからread-only cleanup計画を生成",
+    )
+    backup_cleanup_plan_parser.add_argument(
+        "inventory_json",
+        type=Path,
+        metavar="INVENTORY_JSON",
+        help="入力となるBackup Inventory v1",
+    )
+    backup_cleanup_plan_parser.add_argument(
+        "--backup-root",
+        type=Path,
+        metavar="BACKUP_ROOT",
+        required=True,
+        help="report領域外であることを検証するbackup root",
+    )
+    backup_cleanup_plan_parser.add_argument(
+        "--session",
+        action="append",
+        required=True,
+        metavar="SESSION",
+        help="cleanup候補にするsession（複数指定可）",
+    )
+    backup_cleanup_plan_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        required=True,
+        help="決定的なBackup Cleanup Plan v1の出力先",
+    )
+    backup_cleanup_approval_parser = subparsers.add_parser(
+        "approve-backup-cleanup",
+        help="Cleanup Planのplanned actionを明示承認",
+    )
+    backup_cleanup_approval_parser.add_argument(
+        "plan_json",
+        type=Path,
+        metavar="PLAN_JSON",
+        help="承認するBackup Cleanup Plan v1",
+    )
+    backup_cleanup_approval_parser.add_argument(
+        "--backup-root",
+        type=Path,
+        metavar="BACKUP_ROOT",
+        required=True,
+        help="report領域外であることを検証するbackup root",
+    )
+    backup_cleanup_approval_parser.add_argument(
+        "--all-planned",
+        action="store_true",
+        required=True,
+        help="eligible=trueの全actionだけを承認",
+    )
+    backup_cleanup_approval_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        required=True,
+        help="決定的なBackup Cleanup Approval v1の出力先",
+    )
     return parser
 
 
@@ -742,6 +814,97 @@ def _run_backup_inventory(
     return inventory.exit_code
 
 
+def _cleanup_lifecycle_paths_are_safe(
+    backup_root: Path,
+    input_path: Path,
+    report_path: Path,
+) -> bool:
+    try:
+        backup_resolved = backup_root.resolve(strict=False)
+        backup_overlaps_repository = any(
+            backup_resolved == root or backup_resolved.is_relative_to(root)
+            for root in repository_roots(backup_root)
+        )
+        return (
+            backup_root.is_dir()
+            and not path_uses_link_or_reparse(backup_root)
+            and not backup_overlaps_repository
+            and not path_is_within(input_path, backup_root)
+            and not path_is_within(report_path, backup_root)
+            and not path_uses_link_or_reparse(input_path)
+            and not path_uses_link_or_reparse(report_path)
+            and not _paths_are_equal(input_path, report_path)
+        )
+    except OSError:
+        return False
+
+
+def _run_backup_cleanup_plan(
+    inventory_path: Path,
+    *,
+    backup_root: Path,
+    sessions: Sequence[str],
+    report_json: Path,
+) -> int:
+    if not _cleanup_lifecycle_paths_are_safe(backup_root, inventory_path, report_json):
+        print("エラー: Cleanup Planの入力または出力先を安全に検証できません", file=sys.stderr)
+        return 2
+    if (report_json.exists() or report_json.is_symlink()) and not is_backup_cleanup_plan_report(
+        report_json
+    ):
+        print("エラー: 既存のBackup Cleanup Plan以外は上書きできません", file=sys.stderr)
+        return 2
+    try:
+        plan = build_backup_cleanup_plan(inventory_path, tuple(sessions))
+    except Exception as exc:  # noqa: BLE001 - input details remain sanitized.
+        LOGGER.error("backup_cleanup_plan_invalid exception_type=%s", type(exc).__name__)
+        print("Backup Cleanup Planの入力を検証できませんでした。", file=sys.stderr)
+        return 2
+    for action in plan.actions:
+        print(f"Cleanup候補: session={action.session} eligible={str(action.eligible).lower()}")
+    try:
+        write_backup_cleanup_plan(report_json, plan)
+    except Exception as exc:  # noqa: BLE001 - output details remain sanitized.
+        LOGGER.error("backup_cleanup_plan_write_failed exception_type=%s", type(exc).__name__)
+        print("Backup Cleanup Planを書き込めませんでした。", file=sys.stderr)
+        return 2
+    print(
+        f"Backup Cleanup Plan: requested={len(plan.actions)} "
+        f"planned={plan.planned} blocked={len(plan.actions) - plan.planned}"
+    )
+    return 0
+
+
+def _run_backup_cleanup_approval(
+    plan_path: Path,
+    *,
+    backup_root: Path,
+    report_json: Path,
+) -> int:
+    if not _cleanup_lifecycle_paths_are_safe(backup_root, plan_path, report_json):
+        print("エラー: Cleanup Approvalの入力または出力先を安全に検証できません", file=sys.stderr)
+        return 2
+    if (report_json.exists() or report_json.is_symlink()) and not is_backup_cleanup_approval_report(
+        report_json
+    ):
+        print("エラー: 既存のBackup Cleanup Approval以外は上書きできません", file=sys.stderr)
+        return 2
+    try:
+        approval = build_backup_cleanup_approval(plan_path)
+    except Exception as exc:  # noqa: BLE001 - input details remain sanitized.
+        LOGGER.error("backup_cleanup_approval_invalid exception_type=%s", type(exc).__name__)
+        print("Backup Cleanup Planを検証できませんでした。", file=sys.stderr)
+        return 2
+    try:
+        write_backup_cleanup_approval(report_json, approval)
+    except Exception as exc:  # noqa: BLE001 - output details remain sanitized.
+        LOGGER.error("backup_cleanup_approval_write_failed exception_type=%s", type(exc).__name__)
+        print("Backup Cleanup Approvalを書き込めませんでした。", file=sys.stderr)
+        return 2
+    print(f"Backup Cleanup承認: approved={len(approval.approved_actions)}")
+    return 0
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -786,6 +949,19 @@ def run(
         return _run_backup_inventory(
             args.backup_root,
             package_root=args.package_root,
+            report_json=args.report_json,
+        )
+    if args.command == "backup-cleanup-plan":
+        return _run_backup_cleanup_plan(
+            args.inventory_json,
+            backup_root=args.backup_root,
+            sessions=args.session,
+            report_json=args.report_json,
+        )
+    if args.command == "approve-backup-cleanup":
+        return _run_backup_cleanup_approval(
+            args.plan_json,
+            backup_root=args.backup_root,
             report_json=args.report_json,
         )
     if (
