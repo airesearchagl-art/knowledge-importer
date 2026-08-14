@@ -201,9 +201,9 @@ session作成直後は`open`です。各backupを作成してsourceとのdigest�
 
 managed session treeに置けるものは`session-manifest.json`、Manifestで宣言された通常backup file、その親directoryだけです。未宣言file・directory、symlink、junction／reparse point、absolute path、`..`、重複source・backup path、session root外へ解決されるpathは拒否されます。Inventoryはsession manifestを含む全宣言fileを固定順・長さ付きencodingでhashし、決定的な`tree_sha256`を出力します。
 
-`backup-inventory BACKUP_ROOT`は`--package-root`を必須とするread-only検査です。backup root自身と全path componentでsymlink／junction／reparse pointを追跡せず、package rootまたは検出可能なGit repositoryと重なるbackup rootを拒否します。分類は`managed`、`missing-session-manifest`、`invalid-session-manifest`、`interrupted-open-session`、`unexpected-entry`、`binding-unverifiable`、`legacy-unmanaged`です。v0.1.0で作成済みの従来sessionは変更・移行せず`legacy-unmanaged`として検出します。
+`backup-inventory BACKUP_ROOT`は`--package-root`を必須とするread-only検査です。backup root自身と全path componentでsymlink／junction／reparse pointを追跡せず、package rootまたは検出可能なGit repositoryと重なるbackup rootを拒否します。分類は`managed`、`missing-session-manifest`、`invalid-session-manifest`、`interrupted-open-session`、`unexpected-entry`、`binding-unverifiable`、`legacy-unmanaged`です。backup root直下の既知session prefixに一致しないfile、directory、symlink、junction／reparse point、その他のentryも無視せず`unexpected-entry`として報告し、その内容をcleanup候補として解釈しません。v0.1.0で作成済みの従来sessionは変更・移行せず`legacy-unmanaged`として検出します。
 
-将来のcleanup planning候補を示す`planning_eligible`は、構造とdigestが有効な`complete` sessionだけが`true`です。`open`、`rolled-back`、`rollback-failed`、invalid／orphan／legacy sessionは保守的に`false`です。これは削除許可ではありません。`--report-json`はbackup root外だけに出力でき、有効なBackup Inventory v1自身だけatomic更新できます。cleanup plan、approval、cleanup execution、自動削除、age／size／generation retention policyはこのversionにはありません。
+将来のcleanup planning候補を示す`planning_eligible`は、構造とdigestが有効な`complete` sessionだけが`true`です。`open`、`rolled-back`、`rollback-failed`、invalid／orphan／legacy／unexpected entryは保守的に`false`です。これは削除許可ではありません。v1のbinding検査はsession manifest内に記録されたbinding metadataのschema妥当性を確認するもので、元のManifest・Plan・Approval・Preflight実bytesとの再照合ではありません。`--report-json`はbackup root外だけに出力でき、有効なBackup Inventory v1自身だけatomic更新できます。cleanup plan、approval、cleanup execution、自動削除、age／size／generation retention policyはこのversionにはありません。
 
 終了コードは全sessionが健全な`managed`（`complete`または`rolled-back`）なら`0`、interrupted、rollback failure、invalid、orphan、legacy-unmanagedを1件以上検出した場合は`1`、CLI input・unsafe root・report path・report書込みerrorは`2`です。
 

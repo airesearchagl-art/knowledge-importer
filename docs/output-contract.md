@@ -509,7 +509,7 @@ managed treeはsession manifest、宣言済みregular backup file、その親dir
 
 sessionとitemはNFC正規化・casefoldを基準に固定順で出力します。`tree_sha256`はsession manifestを含む宣言fileをrelative path順に並べ、record type、UTF-8 path長、path bytes、content長、content bytesを曖昧性のないlength-prefix形式でhashします。同じfilesystem stateから同じUTF-8、2-space indent、trailing newlineのJSON bytesを生成します。
 
-分類は`managed`、`missing-session-manifest`、`invalid-session-manifest`、`interrupted-open-session`、`unexpected-entry`、`binding-unverifiable`、`legacy-unmanaged`です。従来の`knowledge-importer-repair-*` sessionは自動移行せず`legacy-unmanaged`です。`planning_eligible=true`はvalidな`complete` sessionだけで、`open`、`rolled-back`、`rollback-failed`、orphan、invalid、legacyはblocked寄りに扱います。このfieldはcleanup permissionではありません。
+分類は`managed`、`missing-session-manifest`、`invalid-session-manifest`、`interrupted-open-session`、`unexpected-entry`、`binding-unverifiable`、`legacy-unmanaged`です。backup root直下の既知session prefixに一致しないregular file、directory、symlink、junction／reparse point、その他のentryも無視せず、内容へ降りずに`unexpected-entry`として報告します。従来の`knowledge-importer-repair-*` sessionは自動移行せず`legacy-unmanaged`です。`planning_eligible=true`はvalidな`complete` sessionだけで、`open`、`rolled-back`、`rollback-failed`、orphan、invalid、legacy、unexpected entryはblocked寄りに扱います。このfieldはcleanup permissionではありません。v1のbinding検査はsession manifest内に記録されたbinding metadataのschema妥当性を確認し、元のManifest・Plan・Approval・Preflight実bytesとは再照合しません。
 
 Inventory reportはbackup root配下へ置けず、有効なBackup Inventory v1自身だけatomic更新できます。timestamp、hostname、username、cwd、command line、absolute path、tracebackを含めません。cleanup plan、cleanup approval、cleanup audit、cleanup execution、unlink、rmdir、rmtree、自動cleanup、age／size／generation retentionは未実装です。
 

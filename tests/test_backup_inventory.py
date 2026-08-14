@@ -201,6 +201,97 @@ def test_legacy_v010_session_is_detected_but_not_migrated(tmp_path: Path) -> Non
     assert not (legacy / SESSION_MANIFEST_FILENAME).exists()
 
 
+@pytest.mark.parametrize("entry_kind", ["file", "directory"])
+def test_unknown_backup_root_entry_is_reported_without_modification(
+    tmp_path: Path,
+    entry_kind: str,
+) -> None:
+    package_root, backup_root = _roots(tmp_path)
+    unknown = backup_root / "unmanaged-entry"
+    if entry_kind == "file":
+        unknown.write_bytes(b"unmanaged bytes")
+        before = unknown.read_bytes()
+    else:
+        unknown.mkdir()
+        child = unknown / "not-a-cleanup-candidate.bin"
+        child.write_bytes(b"directory remains untouched")
+        before = child.read_bytes()
+
+    result = build_backup_inventory(package_root, backup_root)
+
+    assert result.exit_code == 1
+    assert len(result.sessions) == 1
+    assert result.sessions[0].classification is BackupSessionClassification.UNEXPECTED_ENTRY
+    assert not result.sessions[0].planning_eligible
+    if entry_kind == "file":
+        assert unknown.read_bytes() == before
+    else:
+        assert child.read_bytes() == before
+
+
+def test_unknown_backup_root_symlink_is_reported_without_following(
+    tmp_path: Path,
+) -> None:
+    package_root, backup_root = _roots(tmp_path)
+    outside = tmp_path / "outside-root-entry"
+    outside.mkdir()
+    marker = outside / "marker.bin"
+    marker.write_bytes(b"outside remains unchanged")
+    unknown = backup_root / "unmanaged-link"
+    try:
+        unknown.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+
+    result = build_backup_inventory(package_root, backup_root)
+
+    assert result.exit_code == 1
+    assert result.sessions[0].classification is BackupSessionClassification.UNEXPECTED_ENTRY
+    assert marker.read_bytes() == b"outside remains unchanged"
+
+
+def test_unknown_root_entry_and_managed_session_are_both_reported(
+    tmp_path: Path,
+) -> None:
+    package_root, backup_root = _roots(tmp_path)
+    _managed_session(backup_root, suffix="healthy")
+    unknown = backup_root / "unknown.bin"
+    unknown.write_bytes(b"preserve")
+
+    result = build_backup_inventory(package_root, backup_root)
+
+    assert result.exit_code == 1
+    assert [session.classification for session in result.sessions] == [
+        BackupSessionClassification.MANAGED,
+        BackupSessionClassification.UNEXPECTED_ENTRY,
+    ]
+    assert result.sessions[0].planning_eligible
+    assert not result.sessions[1].planning_eligible
+    assert unknown.read_bytes() == b"preserve"
+
+
+def test_unknown_root_entries_have_deterministic_safe_references(
+    tmp_path: Path,
+) -> None:
+    package_root, backup_root = _roots(tmp_path)
+    (backup_root / "zulu").write_bytes(b"z")
+    unsafe_name = "alpha entry"
+    (backup_root / unsafe_name).write_bytes(b"a")
+
+    first = build_backup_inventory(package_root, backup_root)
+    second = build_backup_inventory(package_root, backup_root)
+
+    assert first.payload() == second.payload()
+    assert first.sessions[0].session.startswith("invalid-session-")
+    assert unsafe_name not in json.dumps(first.payload(), ensure_ascii=False)
+    assert all(
+        session.classification is BackupSessionClassification.UNEXPECTED_ENTRY
+        for session in first.sessions
+    )
+    serialized = json.dumps(first.payload(), ensure_ascii=False)
+    assert str(tmp_path) not in serialized
+
+
 def test_missing_and_invalid_session_manifests_are_classified(tmp_path: Path) -> None:
     package_root, backup_root = _roots(tmp_path)
     missing = backup_root / f"{MANAGED_SESSION_PREFIX}missing"

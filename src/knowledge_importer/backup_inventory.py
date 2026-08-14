@@ -633,6 +633,13 @@ def build_backup_inventory(package_root: Path, backup_root: Path) -> BackupInven
             sessions.append(_inspect_managed_session(Path(entry.path)))
         elif entry.name.startswith(LEGACY_SESSION_PREFIX):
             sessions.append(_inspect_legacy_session(Path(entry.path)))
+        else:
+            sessions.append(
+                _invalid_session(
+                    entry.name,
+                    BackupSessionClassification.UNEXPECTED_ENTRY,
+                )
+            )
     return BackupInventory(tuple(sessions))
 
 
