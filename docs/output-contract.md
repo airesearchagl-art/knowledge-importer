@@ -514,3 +514,57 @@ sessionとitemはNFC正規化・casefoldを基準に固定順で出力します�
 Inventory reportはbackup root配下へ置けず、有効なBackup Inventory v1自身だけatomic更新できます。timestamp、hostname、username、cwd、command line、absolute path、tracebackを含めません。cleanup plan、cleanup approval、cleanup audit、cleanup execution、unlink、rmdir、rmtree、自動cleanup、age／size／generation retentionは未実装です。
 
 終了コードは健全なmanaged sessionだけ（0 sessionを含む）なら`0`、interrupted、rollback failure、invalid、orphan、legacy-unmanaged検出時は`1`、CLI・root safety・report protection／write errorは`2`です。
+
+## Backup Cleanup Plan schema version 1
+
+`knowledge-importer backup-cleanup-plan INVENTORY_JSON --backup-root BACKUP_ROOT --session SESSION... --report-json PATH`は、Backup Inventory v1を変更せずに明示sessionだけをdry-run計画へ変換します。Inventoryと出力reportはbackup rootおよび対象session配下へ置けません。`--backup-root`はInventoryがabsolute pathを保持しない設計を補う明示的な安全境界です。backup rootが検出可能なGit repository内にある場合と、入力・出力pathのsymlink、junction／reparse point、directory、同一path、既存の異種schemaを拒否します。
+
+```json
+{
+  "report_type": "knowledge-importer-backup-cleanup-plan",
+  "schema_version": 1,
+  "inventory": {
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "schema_version": 1
+  },
+  "policy": {"mode": "explicit-sessions"},
+  "summary": {"requested": 1, "planned": 1, "blocked": 0},
+  "actions": [
+    {
+      "action": "delete-backup-session",
+      "reason_category": "explicit-retention-release",
+      "session": "knowledge-importer-repair-v1-example",
+      "session_manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "tree_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "backup_files": 1,
+      "backup_bytes": 123,
+      "eligible": true
+    }
+  ]
+}
+```
+
+PlanはInventory fileのparse後payloadではなく元file実bytesをSHA-256へ入力します。policyは`explicit-sessions`だけ、actionは`delete-backup-session / explicit-retention-release`だけです。CLI指定順ではなくsessionのNFC正規化・casefoldによるcanonical順で出力し、重複sessionを拒否します。同一Inventory bytesと同一session setからbyte-identicalなPlanを生成します。
+
+`eligible=true`はInventory上の`managed / complete / planning_eligible=true`だけです。unknown、legacy-unmanaged、interrupted-open-session、rollback-failed、missing／invalid、unexpected-entry、binding-unverifiableは`eligible=false`でPlanへ残し、digestを`null`、件数を`0`へ固定します。blocked actionを含んでもPlan生成は`0`です。これは削除許可でもcleanup executionでもありません。
+
+## Backup Cleanup Approval schema version 1
+
+`knowledge-importer approve-backup-cleanup PLAN_JSON --backup-root BACKUP_ROOT --all-planned --report-json PATH`はPlan v1のeligible actionだけを明示承認します。
+
+```json
+{
+  "report_type": "knowledge-importer-backup-cleanup-approval",
+  "schema_version": 1,
+  "plan": {
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "schema_version": 1
+  },
+  "scope": {"mode": "all-planned"},
+  "approved_actions": []
+}
+```
+
+ApprovalはPlan fileの元実bytes SHA-256へexact-byte bindingし、`scope.mode=all-planned`を固定します。blocked／unsafe actionをApprovalへ含めるescape hatchはなく、approved action 0件もvalidです。同一Plan bytesからbyte-identicalなApprovalを生成します。standalone parserはApproval自身のschemaとaction semanticを検証し、正式verifierはPlan bytesとApproval bytesを同時にparseしてPlan SHA-256を再計算します。さらにPlanの全eligible actionとApproval actionを、session、action、reason category、session manifest SHA-256、tree SHA-256、backup files、backup bytes、eligible、順序まで完全一致で比較します。eligible actionの欠落、Plan外action、metadata改変、順序変更は拒否します。将来Cleanup ExecutionはApproval単体を信頼せず、必ずこのverifierを通過したPlan／Approvalだけを入力にします。PlanとApprovalの既存fileは各自のvalidなschema version 1だけatomic更新でき、Inventoryや他schema、Markdown、CSV、directory、linkを上書きしません。
+
+Plan／Approval生成の成功はblockedまたは0 actionを含めて`0`、CLI input、invalid schema、unsafe path、既存report衝突、write errorは`2`です。PR2はread-only planning／approvalだけで、cleanup execution、backup mutation、`unlink`、`rmdir`、`rmtree`、automatic retention、age／size／generation selectionを実装しません。

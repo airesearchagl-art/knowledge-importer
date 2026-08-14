@@ -207,6 +207,26 @@ managed session treeに置けるものは`session-manifest.json`、Manifestで�
 
 終了コードは全sessionが健全な`managed`（`complete`または`rolled-back`）なら`0`、interrupted、rollback failure、invalid、orphan、legacy-unmanagedを1件以上検出した場合は`1`、CLI input・unsafe root・report path・report書込みerrorは`2`です。
 
+### Backup Cleanup Plan / Approval v1（dry-run）
+
+Backup Inventory v1から削除候補を明示選択する場合は、`backup-cleanup-plan`へsessionを1件ずつ指定します。指定順ではなくNFC正規化・casefoldによるcanonical順で出力し、同一sessionの重複指定を拒否します。`--backup-root`はInventoryが保持しないfilesystem境界を明示し、Inventory、Plan、Approvalの入力・出力がbackup rootや対象session配下へ置かれることを防ぎます。backup root自身が検出可能なGit repository内にある場合も拒否します。
+
+```powershell
+uv run knowledge-importer backup-cleanup-plan .\reports\backup-inventory.json `
+  --backup-root D:\safe-backups\knowledge-importer `
+  --session knowledge-importer-repair-v1-example `
+  --report-json .\reports\backup-cleanup-plan.json
+
+uv run knowledge-importer approve-backup-cleanup .\reports\backup-cleanup-plan.json `
+  --backup-root D:\safe-backups\knowledge-importer `
+  --all-planned `
+  --report-json .\reports\backup-cleanup-approval.json
+```
+
+Cleanup Plan schema version 1は入力Inventory fileの実bytes SHA-256へbindingし、`policy.mode=explicit-sessions`、`action=delete-backup-session`、`reason_category=explicit-retention-release`を固定します。Inventory上で`managed / complete / planning_eligible=true`のsessionだけが`eligible=true`です。unknown、legacy、open、rollback-failed、invalid、unexpectedその他はblocked actionとしてPlanに残りますが、Approvalへは入りません。blockedを含むPlanや承認action 0件のApprovalも正常なdry-run出力で、終了コードは`0`です。input、schema、binding用metadata、path、既存report保護、書込みerrorは`2`です。
+
+Cleanup Approval schema version 1はPlan fileの実bytes SHA-256へbindingし、`scope.mode=all-planned`でeligible actionだけをPlanのcanonical順のまま保持します。正式verifierはPlanとApprovalの両bytesを同時に検証し、Plan SHA-256に加えてsession、action、reason category、session manifest／tree digest、backup file／byte count、eligible、action順序がPlanのeligible action集合と完全一致することを必須にします。subset承認やPlan外actionは無効です。将来Cleanup Executionは必ずこのverifierを通し、Approval単体のparse結果だけで実行してはいけません。Plan/ApprovalはUTF-8、2-space indent、trailing newline、timestamp等なしで決定的です。既存fileは同じschemaのvalid reportだけatomic更新できます。この段階ではbackup file・directoryを変更せず、cleanup execution、`unlink`、`rmdir`、`rmtree`、自動retention、age／size／generation選択は実装していません。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell
