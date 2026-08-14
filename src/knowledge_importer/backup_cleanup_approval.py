@@ -88,6 +88,22 @@ def parse_backup_cleanup_approval_bytes(content: bytes) -> BackupCleanupApproval
     return BackupCleanupApproval(plan["sha256"], actions)
 
 
+def verify_backup_cleanup_approval(
+    plan_bytes: bytes,
+    approval_bytes: bytes,
+) -> BackupCleanupApproval:
+    """Verify exact Plan bytes and the complete ordered eligible action set."""
+
+    plan = parse_backup_cleanup_plan_bytes(plan_bytes)
+    approval = parse_backup_cleanup_approval_bytes(approval_bytes)
+    if hashlib.sha256(plan_bytes).hexdigest() != approval.plan_sha256:
+        raise ValueError("Backup Cleanup Approval Plan binding mismatch")
+    expected_actions = tuple(action for action in plan.actions if action.eligible)
+    if approval.approved_actions != expected_actions:
+        raise ValueError("Backup Cleanup Approval actions do not match Plan")
+    return approval
+
+
 def is_backup_cleanup_approval_report(path: Path) -> bool:
     """Return whether an existing regular file is a Cleanup Approval v1."""
 

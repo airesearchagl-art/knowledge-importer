@@ -225,7 +225,7 @@ uv run knowledge-importer approve-backup-cleanup .\reports\backup-cleanup-plan.j
 
 Cleanup Plan schema version 1は入力Inventory fileの実bytes SHA-256へbindingし、`policy.mode=explicit-sessions`、`action=delete-backup-session`、`reason_category=explicit-retention-release`を固定します。Inventory上で`managed / complete / planning_eligible=true`のsessionだけが`eligible=true`です。unknown、legacy、open、rollback-failed、invalid、unexpectedその他はblocked actionとしてPlanに残りますが、Approvalへは入りません。blockedを含むPlanや承認action 0件のApprovalも正常なdry-run出力で、終了コードは`0`です。input、schema、binding用metadata、path、既存report保護、書込みerrorは`2`です。
 
-Cleanup Approval schema version 1はPlan fileの実bytes SHA-256へbindingし、`scope.mode=all-planned`でeligible actionだけをPlanのcanonical順のまま保持します。Plan/ApprovalはUTF-8、2-space indent、trailing newline、timestamp等なしで決定的です。既存fileは同じschemaのvalid reportだけatomic更新できます。この段階ではbackup file・directoryを変更せず、cleanup execution、`unlink`、`rmdir`、`rmtree`、自動retention、age／size／generation選択は実装していません。
+Cleanup Approval schema version 1はPlan fileの実bytes SHA-256へbindingし、`scope.mode=all-planned`でeligible actionだけをPlanのcanonical順のまま保持します。正式verifierはPlanとApprovalの両bytesを同時に検証し、Plan SHA-256に加えてsession、action、reason category、session manifest／tree digest、backup file／byte count、eligible、action順序がPlanのeligible action集合と完全一致することを必須にします。subset承認やPlan外actionは無効です。将来Cleanup Executionは必ずこのverifierを通し、Approval単体のparse結果だけで実行してはいけません。Plan/ApprovalはUTF-8、2-space indent、trailing newline、timestamp等なしで決定的です。既存fileは同じschemaのvalid reportだけatomic更新できます。この段階ではbackup file・directoryを変更せず、cleanup execution、`unlink`、`rmdir`、`rmtree`、自動retention、age／size／generation選択は実装していません。
 
 ### Recursive conversion / include・exclude filters
 

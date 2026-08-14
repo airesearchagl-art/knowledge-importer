@@ -565,6 +565,6 @@ PlanはInventory fileのparse後payloadではなく元file実bytesをSHA-256へ�
 }
 ```
 
-ApprovalはPlan fileの元実bytes SHA-256へexact-byte bindingし、`scope.mode=all-planned`を固定します。blocked／unsafe actionをApprovalへ含めるescape hatchはなく、approved action 0件もvalidです。同一Plan bytesからbyte-identicalなApprovalを生成します。PlanとApprovalの既存fileは各自のvalidなschema version 1だけatomic更新でき、Inventoryや他schema、Markdown、CSV、directory、linkを上書きしません。
+ApprovalはPlan fileの元実bytes SHA-256へexact-byte bindingし、`scope.mode=all-planned`を固定します。blocked／unsafe actionをApprovalへ含めるescape hatchはなく、approved action 0件もvalidです。同一Plan bytesからbyte-identicalなApprovalを生成します。standalone parserはApproval自身のschemaとaction semanticを検証し、正式verifierはPlan bytesとApproval bytesを同時にparseしてPlan SHA-256を再計算します。さらにPlanの全eligible actionとApproval actionを、session、action、reason category、session manifest SHA-256、tree SHA-256、backup files、backup bytes、eligible、順序まで完全一致で比較します。eligible actionの欠落、Plan外action、metadata改変、順序変更は拒否します。将来Cleanup ExecutionはApproval単体を信頼せず、必ずこのverifierを通過したPlan／Approvalだけを入力にします。PlanとApprovalの既存fileは各自のvalidなschema version 1だけatomic更新でき、Inventoryや他schema、Markdown、CSV、directory、linkを上書きしません。
 
 Plan／Approval生成の成功はblockedまたは0 actionを含めて`0`、CLI input、invalid schema、unsafe path、既存report衝突、write errorは`2`です。PR2はread-only planning／approvalだけで、cleanup execution、backup mutation、`unlink`、`rmdir`、`rmtree`、automatic retention、age／size／generation selectionを実装しません。

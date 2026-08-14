@@ -8,6 +8,7 @@ import knowledge_importer.cli as cli
 from knowledge_importer.backup_cleanup_approval import (
     build_backup_cleanup_approval,
     parse_backup_cleanup_approval_bytes,
+    verify_backup_cleanup_approval,
 )
 from knowledge_importer.backup_cleanup_plan import (
     BackupCleanupAction,
@@ -39,6 +40,21 @@ def _write_plan(path: Path, actions: tuple[BackupCleanupAction, ...]) -> None:
     write_backup_cleanup_plan(path, BackupCleanupPlan("c" * 64, actions))
 
 
+def _json_bytes(payload: dict[str, object]) -> bytes:
+    return f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n".encode()
+
+
+def _plan_and_approval_bytes(
+    tmp_path: Path,
+    actions: tuple[BackupCleanupAction, ...],
+) -> tuple[bytes, bytes]:
+    plan_path = tmp_path / "plan.json"
+    _write_plan(plan_path, actions)
+    plan_bytes = plan_path.read_bytes()
+    approval = build_backup_cleanup_approval(plan_path)
+    return plan_bytes, _json_bytes(approval.payload())
+
+
 def _approval_args(backup_root: Path, plan: Path, report: Path) -> list[str]:
     return [
         "approve-backup-cleanup",
@@ -68,6 +84,79 @@ def test_approval_binds_exact_plan_bytes_and_excludes_blocked_actions(
     approval = parse_backup_cleanup_approval_bytes(report.read_bytes())
     assert approval.plan_sha256 == hashlib.sha256(plan_bytes).hexdigest()
     assert approval.approved_actions == (planned,)
+
+
+def test_verifier_accepts_valid_plan_and_complete_approval(tmp_path: Path) -> None:
+    planned = _action("knowledge-importer-repair-v1-alpha", eligible=True)
+    blocked = _action("unknown-session", eligible=False)
+    plan_bytes, approval_bytes = _plan_and_approval_bytes(tmp_path, (planned, blocked))
+
+    verified = verify_backup_cleanup_approval(plan_bytes, approval_bytes)
+
+    assert verified.approved_actions == (planned,)
+
+
+def test_verifier_rejects_plan_external_eligible_action(tmp_path: Path) -> None:
+    planned = _action("knowledge-importer-repair-v1-alpha", eligible=True)
+    external = _action("knowledge-importer-repair-v1-zulu", eligible=True)
+    plan_bytes, approval_bytes = _plan_and_approval_bytes(tmp_path, (planned,))
+    payload = json.loads(approval_bytes)
+    payload["approved_actions"].append(external.payload())
+
+    with pytest.raises(ValueError):
+        verify_backup_cleanup_approval(plan_bytes, _json_bytes(payload))
+
+
+def test_verifier_rejects_missing_eligible_action(tmp_path: Path) -> None:
+    alpha = _action("knowledge-importer-repair-v1-alpha", eligible=True)
+    zulu = _action("knowledge-importer-repair-v1-zulu", eligible=True)
+    plan_bytes, approval_bytes = _plan_and_approval_bytes(tmp_path, (alpha, zulu))
+    payload = json.loads(approval_bytes)
+    payload["approved_actions"] = payload["approved_actions"][:1]
+
+    with pytest.raises(ValueError):
+        verify_backup_cleanup_approval(plan_bytes, _json_bytes(payload))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("session_manifest_sha256", "d" * 64),
+        ("tree_sha256", "e" * 64),
+        ("backup_files", 2),
+        ("backup_bytes", 24),
+    ],
+)
+def test_verifier_rejects_approval_action_metadata_tamper(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    planned = _action("knowledge-importer-repair-v1-alpha", eligible=True)
+    plan_bytes, approval_bytes = _plan_and_approval_bytes(tmp_path, (planned,))
+    payload = json.loads(approval_bytes)
+    payload["approved_actions"][0][field] = value
+
+    with pytest.raises(ValueError):
+        verify_backup_cleanup_approval(plan_bytes, _json_bytes(payload))
+
+
+def test_verifier_rejects_exact_plan_byte_change(tmp_path: Path) -> None:
+    planned = _action("knowledge-importer-repair-v1-alpha", eligible=True)
+    plan_bytes, approval_bytes = _plan_and_approval_bytes(tmp_path, (planned,))
+    changed_plan_bytes = plan_bytes.replace(b"\n", b"\r\n")
+
+    with pytest.raises(ValueError):
+        verify_backup_cleanup_approval(changed_plan_bytes, approval_bytes)
+
+
+def test_verifier_accepts_zero_eligible_actions_and_empty_approval(tmp_path: Path) -> None:
+    blocked = _action("unknown-session", eligible=False)
+    plan_bytes, approval_bytes = _plan_and_approval_bytes(tmp_path, (blocked,))
+
+    verified = verify_backup_cleanup_approval(plan_bytes, approval_bytes)
+
+    assert verified.approved_actions == ()
 
 
 def test_approval_is_deterministic_and_can_replace_itself(tmp_path: Path) -> None:
