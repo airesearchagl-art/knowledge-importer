@@ -187,6 +187,26 @@ uv run knowledge-importer repair-execute .\output `
 
 終了コードは全action成功またはaction 0件が`0`、TOCTOU・mutation・post-validation・rollback failureが`1`、CLI/schema/binding/report path/report書込みerrorが`2`です。Execution Report書込みはmutation後の独立処理であり、report書込み失敗だけを理由に成功済みpackage変更をrollbackしません。reportには相対POSIX pathとdigestだけを記録し、backup絶対path、timestamp、username、hostname、cwd、command line、tracebackを含めません。
 
+### Backup Session Manifest / read-only Inventory v1
+
+```powershell
+uv run knowledge-importer backup-inventory D:\safe-backups\knowledge-importer `
+  --package-root .\output `
+  --report-json .\reports\backup-inventory.json
+```
+
+`remove-stale-sidecar`用の新規backup sessionは`knowledge-importer-repair-v1-*`という専用directoryを使い、直下の`session-manifest.json`へBackup Session Manifest schema version 1を保存します。ManifestはRepair Executionが検証したManifest・Plan・Approval・PreflightのSHA-256 bindingと、package相対source path、session相対backup path、bytes、SHA-256だけを保持します。timestamp、hostname、username、cwd、command line、absolute path、tracebackは含めません。
+
+session作成直後は`open`です。各backupを作成してsourceとのdigest一致を確認した後、targetを削除する前にitemをatomic追記します。追記に失敗した場合はtargetを削除しません。全actionとpost-validationが成功した後だけ`complete`、rollback成功後は`rolled-back`、rollback失敗後は`rollback-failed`へ遷移します。process停止や記録不能により完了状態を確定できないsessionは`open`のまま残り、Inventoryでは`interrupted-open-session`となります。
+
+managed session treeに置けるものは`session-manifest.json`、Manifestで宣言された通常backup file、その親directoryだけです。未宣言file・directory、symlink、junction／reparse point、absolute path、`..`、重複source・backup path、session root外へ解決されるpathは拒否されます。Inventoryはsession manifestを含む全宣言fileを固定順・長さ付きencodingでhashし、決定的な`tree_sha256`を出力します。
+
+`backup-inventory BACKUP_ROOT`は`--package-root`を必須とするread-only検査です。backup root自身と全path componentでsymlink／junction／reparse pointを追跡せず、package rootまたは検出可能なGit repositoryと重なるbackup rootを拒否します。分類は`managed`、`missing-session-manifest`、`invalid-session-manifest`、`interrupted-open-session`、`unexpected-entry`、`binding-unverifiable`、`legacy-unmanaged`です。backup root直下の既知session prefixに一致しないfile、directory、symlink、junction／reparse point、その他のentryも無視せず`unexpected-entry`として報告し、その内容をcleanup候補として解釈しません。v0.1.0で作成済みの従来sessionは変更・移行せず`legacy-unmanaged`として検出します。
+
+将来のcleanup planning候補を示す`planning_eligible`は、構造とdigestが有効な`complete` sessionだけが`true`です。`open`、`rolled-back`、`rollback-failed`、invalid／orphan／legacy／unexpected entryは保守的に`false`です。これは削除許可ではありません。v1のbinding検査はsession manifest内に記録されたbinding metadataのschema妥当性を確認するもので、元のManifest・Plan・Approval・Preflight実bytesとの再照合ではありません。`--report-json`はbackup root外だけに出力でき、有効なBackup Inventory v1自身だけatomic更新できます。cleanup plan、approval、cleanup execution、自動削除、age／size／generation retention policyはこのversionにはありません。
+
+終了コードは全sessionが健全な`managed`（`complete`または`rolled-back`）なら`0`、interrupted、rollback failure、invalid、orphan、legacy-unmanagedを1件以上検出した場合は`1`、CLI input・unsafe root・report path・report書込みerrorは`2`です。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell

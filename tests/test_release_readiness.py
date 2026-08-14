@@ -166,6 +166,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     approve_repair_help = _run_command([str(cli), "approve-repair", "--help"])
     repair_preflight_help = _run_command([str(cli), "repair-preflight", "--help"])
     repair_execute_help = _run_command([str(cli), "repair-execute", "--help"])
+    backup_inventory_help = _run_command([str(cli), "backup-inventory", "--help"])
     module_help = _run_command([str(python), "-m", "knowledge_importer", "--help"])
     for option in EXPECTED_OPTIONS:
         assert option in cli_help
@@ -175,6 +176,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "approve-repair" in module_help
     assert "repair-preflight" in module_help
     assert "repair-execute" in module_help
+    assert "backup-inventory" in module_help
     for option in ("--manifest", "--report-json", "--strict"):
         assert option in validate_help
         assert option in repair_plan_help
@@ -191,6 +193,8 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
         "--backup-dir",
     ):
         assert option in repair_execute_help
+    for option in ("--package-root", "--report-json"):
+        assert option in backup_inventory_help
     metadata = _run_command(
         [
             str(python),
@@ -198,6 +202,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
             (
                 "from importlib.metadata import version; "
                 "import knowledge_importer.artifact_manifest, knowledge_importer.cli, "
+                "knowledge_importer.backup_inventory, "
                 "knowledge_importer.json_writer, "
                 "knowledge_importer.markdown_quality, knowledge_importer.package_validation, "
                 "knowledge_importer.quality_report, knowledge_importer.repair_approval, "
@@ -221,6 +226,7 @@ def test_readme_documents_every_public_batch_option() -> None:
     assert "--all-safe" in readme
     assert "repair-preflight" in readme
     assert "repair-execute" in readme
+    assert "backup-inventory" in readme
     assert version("knowledge-importer") == "0.1.0"
 
 
