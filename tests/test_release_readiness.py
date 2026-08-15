@@ -176,6 +176,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     backup_cleanup_approval_help = _run_command([str(cli), "approve-backup-cleanup", "--help"])
     backup_cleanup_execute_help = _run_command([str(cli), "backup-cleanup-execute", "--help"])
     audit_help = _run_command([str(cli), "audit", "--help"])
+    audit_verify_help = _run_command([str(cli), "audit-verify", "--help"])
     module_help = _run_command([str(python), "-m", "knowledge_importer", "--help"])
     for option in EXPECTED_OPTIONS:
         assert option in cli_help
@@ -190,6 +191,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "approve-backup-cleanup" in module_help
     assert "backup-cleanup-execute" in module_help
     assert "audit" in module_help
+    assert "audit-verify" in module_help
     for option in ("--manifest", "--report-json", "--strict"):
         assert option in validate_help
         assert option in repair_plan_help
@@ -222,6 +224,9 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
         assert option in backup_cleanup_execute_help
     for option in ("--repair-execution", "--backup-cleanup-audit", "--report-json"):
         assert option in audit_help
+    assert "OPERATIONAL_AUDIT_JSON" in audit_verify_help
+    for option in ("--repair-execution", "--backup-cleanup-audit"):
+        assert option in audit_verify_help
     metadata = _run_command(
         [
             str(python),
@@ -259,6 +264,7 @@ def test_readme_documents_every_public_batch_option() -> None:
     assert "repair-execute" in readme
     assert "backup-inventory" in readme
     assert "knowledge-importer audit" in readme
+    assert "knowledge-importer audit-verify" in readme
     assert version("knowledge-importer") == "0.1.0"
 
 

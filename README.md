@@ -255,7 +255,19 @@ uv run knowledge-importer audit `
 
 outcomeは`succeeded / partial / failed / rolled_back / not_run`へ正規化します。Repairの`rollback-failed`は`partial`、Cleanupの`failed`はmutationを推測せず`failed`です。package変更はsourceに完全な前後digest証跡がある場合だけ`changed / unchanged`とし、それ以外は`unknown`です。Cleanupだけからpackage非変更を推測しません。失敗・rollback・not-runは変換やcleanupを再実行せず、operator確認が必要な状態として集計します。
 
-出力はUTF-8、2-space indent、trailing newlineで、timestamp、hostname、username、cwd、command line、absolute path、traceback、Unicode format controlを含めません。`--report-json`は新規pathだけを許可し、同一directoryのtemporary fileをfsync後、hard-linkでcreate-only／no-clobber作成します。既存entryや並行writerを上書きしません。valid sourceの集約はoperation結果にかかわらず終了コード`0`、source／schema／出力境界／書込みerrorは`2`です。Auditはread-onlyで、package、backup、既存reportを変更しません。source report自体が失われた場合は再構築できず、独立した`audit-verify`とIntent Receiptは今回の範囲外です。
+出力はUTF-8、2-space indent、trailing newlineで、timestamp、hostname、username、cwd、command line、absolute path、traceback、Unicode format controlを含めません。`--report-json`は新規pathだけを許可し、同一directoryのtemporary fileをfsync後、hard-linkでcreate-only／no-clobber作成します。既存entryや並行writerを上書きしません。valid sourceの集約はoperation結果にかかわらず終了コード`0`、source／schema／出力境界／書込みerrorは`2`です。Auditはread-onlyで、package、backup、既存reportを変更しません。source report自体が失われた場合は再構築できません。
+
+作成済みSummaryと現在のsource実bytesは、read-onlyの`audit-verify`で再照合できます。
+
+```powershell
+uv run knowledge-importer audit-verify .\reports\operational-audit.json `
+  --repair-execution .\reports\repair-execution.json `
+  --backup-cleanup-audit .\reports\backup-cleanup-audit.json
+```
+
+source optionは各々複数回指定でき、Summaryの`sources`と`source_type + exact input bytes SHA-256`の完全一致を要求します。filename、path、mtime、parse後の再serialize結果ではbindingしません。exact match後はsourceを正式parseし、source actionから再構成したcanonical operation projectionとSummaryも比較します。source不足、余分なsource、同一sourceの重複、1 byteの改変は終了コード`1`、Summary／exact-bound sourceのschema・semantic不正やoperation不一致、I/O errorは`2`、全source・operation一致は`0`です。CLI指定順は結果へ影響せず、stdoutは件数と`source_binding=verified`を決定的に表示します。path等の機微情報やtracebackは表示しません。
+
+この確認が保証するのはSummaryと現在のsource bytesのbindingだけです。Repair内のPlan／Approval／Preflight、Cleanup内のInventory／Plan／Approvalは元artifactが入力されないため、`internal_lifecycle_binding=not-provided`と明示します。Summary、source、package、backupを変更せず、新しいreportも作成しません。Intent Receiptは未実装です。
 
 ### Recursive conversion / include・exclude filters
 
