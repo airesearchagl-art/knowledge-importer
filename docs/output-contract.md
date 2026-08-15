@@ -668,4 +668,14 @@ before／afterにはsource reportに存在するdigest、count、exists evidence
 
 `--report-json`はsourceとは異なる新規pathだけを許可します。既存regular file、directory、symlink、junction／reparse point、読取り不能entryを拒否し、temporary fileのflush／fsync後に`os.link(..., follow_symlinks=False)`でcreate-only／no-clobber commitします。並行writerがfinal pathを先に作った場合はそのentryを保持して終了コード`2`です。source valid時の集約成功はoperation outcomeにかかわらず`0`、入力／schema／output／write errorは`2`です。package、backup、source reportへのmutation、destructive action、operation再実行は行いません。
 
-このschemaはsource reportが存在する時点の証跡を集約するもので、失われたRepair Execution ReportやCleanup Auditを再構築しません。Audit Summary自身とsource bytesを後から再照合する独立`audit-verify`、Intent Receipt、automatic retentionは別scopeです。
+このschemaはsource reportが存在する時点の証跡を集約するもので、失われたRepair Execution ReportやCleanup Auditを再構築しません。
+
+### Operational Audit source binding verification
+
+`knowledge-importer audit-verify OPERATIONAL_AUDIT_JSON --repair-execution PATH... --backup-cleanup-audit PATH...`は、Operational Audit Summary v1を正式parseし、Summaryの`sources`と現在渡されたsourceをread-onlyで再照合します。`report_type`、schema version、summary件数、canonical source／operation順、source duplicate、`source_action_index`、source参照、outcome／reason／package change semanticを検証します。unknown v1 fieldは無視し、future schemaは拒否します。
+
+binding identityは`source_type + SHA-256(exact input bytes)`です。filename、path、mtime、parse後payloadの再serialize hashは使いません。Summaryのsource集合とCLI source集合は完全一致が必要で、missing、unexpected、同一identityの重複、1 byteの改変はbinding mismatchです。完全一致後にRepair Execution Report v1またはBackup Cleanup Audit v1として再parseし、source schema／semanticを検証します。さらにsource actionからcanonical operation projectionを再構成し、Summaryのsource／operation全体と意味的に一致することを要求します。CLI source順は結果へ影響しません。
+
+stdoutは`sources_expected / sources_provided / matched / missing / unexpected / invalid / result`とbinding範囲を決定的に表示します。終了コードは全sourceのexact matchと再parse成功が`0`、binding mismatch／missing／unexpected／duplicate／tamperが`1`、CLI／Operational Audit schema／exact-bound source schema／I/O errorが`2`です。absolute path、username、hostname、cwd、command line、tracebackは出力しません。
+
+`source_binding=verified`は現在のsource bytesとSummary bindingだけを意味します。Repair Execution内のPlan／Approval／Preflight digest、Cleanup Audit内のInventory／Plan／Approval digestは元artifactが入力されないため、`internal_lifecycle_binding=not-provided`です。Summary、source、package、backupを変更せず、新しいreportも作成しません。Intent Receiptとautomatic retentionは別scopeです。

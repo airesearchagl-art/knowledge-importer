@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import knowledge_importer.cli as cli
 import knowledge_importer.operational_audit as audit_module
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAudit,
@@ -14,8 +15,12 @@ from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAuditStatus,
 )
 from knowledge_importer.operational_audit import (
+    OperationalAudit,
     OperationalAuditInputError,
+    OperationalAuditSource,
     build_operational_audit,
+    parse_operational_audit_bytes,
+    verify_operational_audit_sources,
     write_operational_audit,
 )
 from knowledge_importer.repair_execution import (
@@ -457,3 +462,370 @@ def test_report_contains_no_source_path_or_forbidden_context(tmp_path: Path) -> 
     assert b"username" not in encoded
     text = encoded.decode()
     assert not any(__import__("unicodedata").category(character) == "Cf" for character in text)
+
+
+def _write_audit(
+    path: Path,
+    *,
+    repair_paths: tuple[Path, ...] = (),
+    cleanup_paths: tuple[Path, ...] = (),
+) -> bytes:
+    write_operational_audit(
+        path,
+        build_operational_audit(
+            repair_execution_paths=repair_paths,
+            backup_cleanup_audit_paths=cleanup_paths,
+        ),
+    )
+    return path.read_bytes()
+
+
+def test_operational_audit_parser_accepts_canonical_report(tmp_path: Path) -> None:
+    repair = tmp_path / "repair.json"
+    cleanup = tmp_path / "cleanup.json"
+    report = tmp_path / "audit.json"
+    _write_repair(repair, (_repair_action("section/a.metadata.json"),))
+    _write_cleanup(
+        cleanup,
+        (
+            _cleanup_action(
+                "knowledge-importer-repair-alpha",
+                BackupCleanupAuditStatus.DELETED,
+                after_exists=False,
+            ),
+        ),
+    )
+    _write_audit(report, repair_paths=(repair,), cleanup_paths=(cleanup,))
+
+    parsed = parse_operational_audit_bytes(report.read_bytes())
+
+    assert parsed.payload() == json.loads(report.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    ["repair", "cleanup", "mixed"],
+)
+def test_verify_accepts_exact_single_and_mixed_sources(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    repair = tmp_path / "repair.json"
+    cleanup = tmp_path / "cleanup.json"
+    _write_repair(repair, (_repair_action("section/a.metadata.json"),))
+    _write_cleanup(cleanup, ())
+    repair_paths = (repair,) if source_kind in {"repair", "mixed"} else ()
+    cleanup_paths = (cleanup,) if source_kind in {"cleanup", "mixed"} else ()
+    report = tmp_path / "audit.json"
+    _write_audit(report, repair_paths=repair_paths, cleanup_paths=cleanup_paths)
+    before = {path: path.read_bytes() for path in (report, *repair_paths, *cleanup_paths)}
+
+    result = verify_operational_audit_sources(
+        report,
+        repair_execution_paths=repair_paths,
+        backup_cleanup_audit_paths=cleanup_paths,
+    )
+
+    assert result.exit_code == 0
+    assert result.result == "verified"
+    assert result.matched == len(repair_paths) + len(cleanup_paths)
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_verify_is_independent_of_cli_source_order(tmp_path: Path) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    _write_repair(first, (_repair_action("a.metadata.json"),))
+    payload = RepairExecutionReport(
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+        (_repair_action("b.metadata.json"),),
+        "passed",
+    ).payload()
+    payload["distinct"] = True
+    second.write_bytes(_json_bytes(payload))
+    report = tmp_path / "audit.json"
+    _write_audit(report, repair_paths=(first, second))
+
+    result = verify_operational_audit_sources(
+        report,
+        repair_execution_paths=(second, first),
+    )
+
+    assert result.exit_code == 0
+    assert result.matched == 2
+
+
+@pytest.mark.parametrize("source_kind", ["repair", "cleanup"])
+def test_one_byte_source_tamper_is_binding_mismatch(tmp_path: Path, source_kind: str) -> None:
+    source = tmp_path / f"{source_kind}.json"
+    if source_kind == "repair":
+        _write_repair(source, ())
+        repair_paths, cleanup_paths = (source,), ()
+    else:
+        _write_cleanup(source, ())
+        repair_paths, cleanup_paths = (), (source,)
+    report = tmp_path / "audit.json"
+    _write_audit(report, repair_paths=repair_paths, cleanup_paths=cleanup_paths)
+    source.write_bytes(source.read_bytes() + b" ")
+
+    result = verify_operational_audit_sources(
+        report,
+        repair_execution_paths=repair_paths,
+        backup_cleanup_audit_paths=cleanup_paths,
+    )
+
+    assert result.exit_code == 1
+    assert result.missing == 1
+    assert result.unexpected == 1
+    assert result.invalid == 0
+
+
+def test_verify_reports_missing_unexpected_and_duplicate_as_mismatch(tmp_path: Path) -> None:
+    expected = tmp_path / "expected.json"
+    extra = tmp_path / "extra.json"
+    _write_repair(expected, ())
+    extra_payload = RepairExecutionReport("a" * 64, "b" * 64, "c" * 64, (), "passed").payload()
+    extra_payload["distinct"] = True
+    extra.write_bytes(_json_bytes(extra_payload))
+    report = tmp_path / "audit.json"
+    _write_audit(report, repair_paths=(expected,))
+
+    missing = verify_operational_audit_sources(report)
+    unexpected = verify_operational_audit_sources(
+        report,
+        repair_execution_paths=(expected, extra),
+    )
+    duplicate = verify_operational_audit_sources(
+        report,
+        repair_execution_paths=(expected, expected),
+    )
+
+    assert (missing.exit_code, missing.missing, missing.unexpected) == (1, 1, 0)
+    assert (unexpected.exit_code, unexpected.missing, unexpected.unexpected) == (1, 0, 1)
+    assert (duplicate.exit_code, duplicate.missing, duplicate.unexpected) == (1, 0, 1)
+
+
+@pytest.mark.parametrize(
+    "invalid_bytes",
+    [
+        b"not json",
+        _json_bytes({"report_type": "invalid", "schema_version": 1}),
+        _json_bytes(
+            {
+                "report_type": "knowledge-package-repair-execution",
+                "schema_version": 2,
+            }
+        ),
+    ],
+)
+def test_exact_bound_invalid_source_is_schema_error(
+    tmp_path: Path,
+    invalid_bytes: bytes,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_bytes(invalid_bytes)
+    descriptor = OperationalAuditSource(
+        "repair-execution",
+        1,
+        hashlib.sha256(invalid_bytes).hexdigest(),
+    )
+    report = tmp_path / "audit.json"
+    write_operational_audit(report, OperationalAudit((descriptor,), ()))
+
+    result = verify_operational_audit_sources(report, repair_execution_paths=(source,))
+
+    assert result.exit_code == 2
+    assert result.invalid == 1
+    assert result.missing == result.unexpected == 0
+
+
+@pytest.mark.parametrize(
+    "audit_bytes",
+    [
+        b"not json",
+        _json_bytes({"report_type": "invalid", "schema_version": 1}),
+        _json_bytes(
+            {
+                "report_type": "knowledge-importer-operational-audit",
+                "schema_version": 2,
+            }
+        ),
+    ],
+)
+def test_invalid_operational_audit_is_input_error(tmp_path: Path, audit_bytes: bytes) -> None:
+    report = tmp_path / "audit.json"
+    report.write_bytes(audit_bytes)
+
+    with pytest.raises(OperationalAuditInputError):
+        verify_operational_audit_sources(report)
+
+
+def _valid_audit_payload(tmp_path: Path) -> dict[str, object]:
+    source = tmp_path / "repair.json"
+    _write_repair(source, (_repair_action("a.metadata.json"),))
+    return build_operational_audit(repair_execution_paths=(source,)).payload()
+
+
+def test_operational_audit_parser_rejects_source_duplicate(tmp_path: Path) -> None:
+    payload = _valid_audit_payload(tmp_path)
+    payload["sources"].append(dict(payload["sources"][0]))
+
+    with pytest.raises(ValueError):
+        parse_operational_audit_bytes(_json_bytes(payload))
+
+
+def test_operational_audit_parser_rejects_noncanonical_source_order(tmp_path: Path) -> None:
+    repair = tmp_path / "repair.json"
+    cleanup = tmp_path / "cleanup.json"
+    _write_repair(repair, ())
+    _write_cleanup(cleanup, ())
+    payload = build_operational_audit(
+        repair_execution_paths=(repair,),
+        backup_cleanup_audit_paths=(cleanup,),
+    ).payload()
+    payload["sources"].reverse()
+
+    with pytest.raises(ValueError):
+        parse_operational_audit_bytes(_json_bytes(payload))
+
+
+def test_operational_audit_parser_rejects_unbound_operation_source(tmp_path: Path) -> None:
+    payload = _valid_audit_payload(tmp_path)
+    payload["operations"][0]["source_sha256"] = "f" * 64
+
+    with pytest.raises(ValueError):
+        parse_operational_audit_bytes(_json_bytes(payload))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("outcome", "failed"),
+        ("reason", "execution-failed"),
+        ("package_change", "unknown"),
+        ("operator_action_required", True),
+    ],
+)
+def test_operational_audit_parser_rejects_operation_semantic_mismatch(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    payload = _valid_audit_payload(tmp_path)
+    payload["operations"][0][field] = value
+
+    with pytest.raises(ValueError):
+        parse_operational_audit_bytes(_json_bytes(payload))
+
+
+def test_operational_audit_parser_rejects_package_change_summary_mismatch(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_audit_payload(tmp_path)
+    payload["summary"]["package_change_observed"] = False
+
+    with pytest.raises(ValueError):
+        parse_operational_audit_bytes(_json_bytes(payload))
+
+
+def test_operational_audit_parser_rejects_count_summary_mismatch(tmp_path: Path) -> None:
+    payload = _valid_audit_payload(tmp_path)
+    payload["summary"]["succeeded"] = 0
+
+    with pytest.raises(ValueError):
+        parse_operational_audit_bytes(_json_bytes(payload))
+
+
+def test_operational_audit_parser_rejects_source_action_index_mismatch(
+    tmp_path: Path,
+) -> None:
+    payload = _valid_audit_payload(tmp_path)
+    payload["operations"][0]["source_action_index"] = 1
+
+    with pytest.raises(ValueError):
+        parse_operational_audit_bytes(_json_bytes(payload))
+
+
+def test_verify_rejects_self_consistent_summary_operation_tamper(tmp_path: Path) -> None:
+    source = tmp_path / "repair.json"
+    _write_repair(source, (_repair_action("a.metadata.json"),))
+    payload = build_operational_audit(repair_execution_paths=(source,)).payload()
+    payload["operations"][0]["target"] = "different.metadata.json"
+    report = tmp_path / "audit.json"
+    report.write_bytes(_json_bytes(payload))
+
+    result = verify_operational_audit_sources(report, repair_execution_paths=(source,))
+
+    assert result.exit_code == 2
+    assert result.matched == 1
+    assert result.invalid == 1
+
+
+def test_verify_rejects_self_consistent_missing_summary_operation(tmp_path: Path) -> None:
+    source = tmp_path / "repair.json"
+    _write_repair(source, (_repair_action("a.metadata.json"),))
+    payload = build_operational_audit(repair_execution_paths=(source,)).payload()
+    payload["operations"] = []
+    payload["summary"] = {
+        "operations": 0,
+        "succeeded": 0,
+        "partial": 0,
+        "failed": 0,
+        "rolled_back": 0,
+        "not_run": 0,
+        "operator_action_required": 0,
+        "package_change_observed": None,
+    }
+    report = tmp_path / "audit.json"
+    report.write_bytes(_json_bytes(payload))
+
+    result = verify_operational_audit_sources(report, repair_execution_paths=(source,))
+
+    assert result.exit_code == 2
+    assert result.matched == 1
+    assert result.invalid == 1
+
+
+def test_operational_audit_parser_allows_unknown_v1_fields(tmp_path: Path) -> None:
+    payload = _valid_audit_payload(tmp_path)
+    payload["future"] = {"ignored": True}
+    payload["sources"][0]["future"] = "ignored"
+    payload["operations"][0]["future"] = "ignored"
+
+    parsed = parse_operational_audit_bytes(_json_bytes(payload))
+
+    assert "future" not in parsed.payload()
+    assert "future" not in parsed.payload()["sources"][0]
+    assert "future" not in parsed.payload()["operations"][0]
+
+
+def test_audit_verify_cli_stdout_is_deterministic_and_path_free(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "private-user" / "repair.json"
+    source.parent.mkdir()
+    _write_repair(source, ())
+    report = tmp_path / "audit.json"
+    _write_audit(report, repair_paths=(source,))
+    arguments = [
+        "audit-verify",
+        str(report),
+        "--repair-execution",
+        str(source),
+    ]
+
+    assert cli.run(arguments) == 0
+    first = capsys.readouterr()
+    assert cli.run(arguments) == 0
+    second = capsys.readouterr()
+
+    assert first.out == second.out
+    assert "result=verified" in first.out
+    assert "source_binding=verified" in first.out
+    assert "internal_lifecycle_binding=not-provided" in first.out
+    assert str(tmp_path) not in first.out + first.err
+    assert "private-user" not in first.out + first.err
+    assert "Traceback" not in first.out + first.err

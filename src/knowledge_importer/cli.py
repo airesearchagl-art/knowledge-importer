@@ -77,6 +77,7 @@ from knowledge_importer.operational_audit import (
     OperationalAuditInputError,
     build_operational_audit,
     validate_operational_audit_output_path,
+    verify_operational_audit_sources,
     write_operational_audit,
 )
 from knowledge_importer.package_validation import (
@@ -538,6 +539,32 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         required=True,
         help="新規pathへcreate-onlyで作成するOperational Audit Summary v1",
+    )
+    audit_verify_parser = subparsers.add_parser(
+        "audit-verify",
+        help="Operational Audit source bindingをread-only再照合",
+    )
+    audit_verify_parser.add_argument(
+        "operational_audit_json",
+        type=Path,
+        metavar="OPERATIONAL_AUDIT_JSON",
+        help="検証するOperational Audit Summary v1",
+    )
+    audit_verify_parser.add_argument(
+        "--repair-execution",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help="現在のRepair Execution Report v1（複数指定可）",
+    )
+    audit_verify_parser.add_argument(
+        "--backup-cleanup-audit",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help="現在のBackup Cleanup Audit v1（複数指定可）",
     )
     return parser
 
@@ -1078,6 +1105,28 @@ def _run_operational_audit(
     return 0
 
 
+def _run_operational_audit_verify(
+    operational_audit_path: Path,
+    *,
+    repair_execution_paths: Sequence[Path],
+    backup_cleanup_audit_paths: Sequence[Path],
+) -> int:
+    try:
+        result = verify_operational_audit_sources(
+            operational_audit_path,
+            repair_execution_paths=repair_execution_paths,
+            backup_cleanup_audit_paths=backup_cleanup_audit_paths,
+        )
+    except OperationalAuditInputError as exc:
+        LOGGER.error("operational_audit_verify_invalid exception_type=%s", type(exc).__name__)
+        print("Operational Auditまたはsourceを検証できませんでした。", file=sys.stderr)
+        return 2
+    print(result.console_summary())
+    source_binding = "verified" if result.exit_code == 0 else "not-verified"
+    print(f"Bindings: source_binding={source_binding} internal_lifecycle_binding=not-provided")
+    return result.exit_code
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -1151,6 +1200,12 @@ def run(
             repair_execution_paths=args.repair_execution,
             backup_cleanup_audit_paths=args.backup_cleanup_audit,
             report_json=args.report_json,
+        )
+    if args.command == "audit-verify":
+        return _run_operational_audit_verify(
+            args.operational_audit_json,
+            repair_execution_paths=args.repair_execution,
+            backup_cleanup_audit_paths=args.backup_cleanup_audit,
         )
     if (
         args.normalize_markdown is not None

@@ -230,6 +230,17 @@ def test_audit_help_describes_repeatable_sources_and_output(capsys: object) -> N
     assert "--report-json PATH" in help_text
 
 
+def test_audit_verify_help_describes_summary_and_repeatable_sources(capsys: object) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["audit-verify", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "OPERATIONAL_AUDIT_JSON" in help_text
+    assert "--repair-execution PATH" in help_text
+    assert "--backup-cleanup-audit PATH" in help_text
+
+
 def test_audit_requires_source_and_creates_no_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
