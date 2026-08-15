@@ -35,6 +35,7 @@ from knowledge_importer.backup_cleanup_execution import (
 from knowledge_importer.backup_cleanup_plan import (
     build_backup_cleanup_plan,
     is_backup_cleanup_plan_report,
+    read_input_bytes,
     write_backup_cleanup_plan,
 )
 from knowledge_importer.backup_inventory import (
@@ -99,6 +100,8 @@ from knowledge_importer.repair_execution import (
     RepairExecutionInputError,
     execute_repair,
     is_execution_report,
+    repair_execution_report_bytes,
+    verify_repair_execution_intent,
     write_execution_report,
 )
 from knowledge_importer.repair_plan import (
@@ -392,6 +395,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="BACKUP_DIR",
         help="package・repository外のbackup保存先",
+    )
+    repair_execute_parser.add_argument(
+        "--intent-receipt",
+        type=Path,
+        metavar="PATH",
+        help="mutation前にcreate-only生成するOperation Intent Receipt v1",
+    )
+    repair_execute_parser.add_argument(
+        "--attempt-id",
+        metavar="ID",
+        help="Receiptを関連付ける安全なoperator correlation label",
     )
     backup_inventory_parser = subparsers.add_parser(
         "backup-inventory",
@@ -798,6 +812,8 @@ def _run_repair_execution(
     preflight_path: Path,
     report_json: Path | None,
     backup_dir: Path | None,
+    intent_receipt: Path | None,
+    attempt_id: str | None,
 ) -> int:
     if not package_root.is_dir() or _is_linked_directory(package_root):
         print("エラー: 存在する通常のpackage rootディレクトリを指定してください", file=sys.stderr)
@@ -828,6 +844,9 @@ def _run_repair_execution(
             approval_path=approval_path,
             preflight_path=preflight_path,
             backup_dir=backup_dir,
+            report_path=report_json,
+            intent_receipt_path=intent_receipt,
+            attempt_id=attempt_id,
         )
     except RepairExecutionInputError as exc:
         LOGGER.error("repair_execution_input_invalid exception_type=%s", type(exc).__name__)
@@ -853,6 +872,15 @@ def _run_repair_execution(
     )
     if report_json is not None:
         try:
+            if intent_receipt is not None:
+                verify_repair_execution_intent(
+                    read_input_bytes(intent_receipt),
+                    repair_execution_report_bytes(report),
+                    manifest_content=read_input_bytes(manifest_path),
+                    plan_content=read_input_bytes(plan_path),
+                    approval_content=read_input_bytes(approval_path),
+                    preflight_content=read_input_bytes(preflight_path),
+                )
             write_execution_report(report_json, report)
         except Exception as exc:  # noqa: BLE001 - report failure must not rollback mutations.
             LOGGER.error(
@@ -1166,6 +1194,8 @@ def run(
             preflight_path=args.preflight,
             report_json=args.report_json,
             backup_dir=args.backup_dir,
+            intent_receipt=args.intent_receipt,
+            attempt_id=args.attempt_id,
         )
     if args.command == "backup-inventory":
         return _run_backup_inventory(

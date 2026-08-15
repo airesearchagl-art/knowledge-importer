@@ -181,11 +181,26 @@ uv run knowledge-importer repair-execute .\output `
   --report-json .\reports\repair-execution.json
 ```
 
+Operation Intent Receiptをmutation前gateにするopt-in modeでは、Receiptと`attempt_id`を追加指定します。receipted modeではfinal Execution Reportが必須です。
+
+```powershell
+uv run knowledge-importer repair-execute .\output `
+  --manifest .\reports\artifacts.json `
+  --plan .\reports\repair-plan.json `
+  --approval .\reports\repair-approval.json `
+  --preflight .\reports\repair-preflight.json `
+  --intent-receipt .\reports\repair-intent-attempt-001.json `
+  --attempt-id repair-attempt-001 `
+  --report-json .\reports\repair-execution.json
+```
+
 `repair-execute`はPlan、Approval、Preflightの実bytes bindingとManifest v1をmutation前に再検証し、Preflightで`ready`となった`regenerate-sidecar`と`remove-stale-sidecar`だけを実行します。unsafe action、`manual-review`、`regenerate-manifest`、`verify-artifact`は実行できません。Preflight後のsidecar存在、Markdown digest、Manifest status、stale sidecar digest、path・symlink状態もaction直前に再検証します。
+
+`--intent-receipt`未指定時は従来のlegacy modeです。指定時は`--attempt-id`と`--report-json`を必須とし、operatorがactionを直接入力することはできません。最初のstable readで検証したManifest／Plan／Approval／Preflightとexecution scopeからReceiptを構築し、create-only書込み、exact bytes再read、parser再検証、SHA-256確定後に全inputを再read／再bindingします。Receipt作成・再検証失敗はmutation 0件で終了コード`2`です。Receipt後のpackage precondition変化は既存どおりaction failureの終了コード`1`となり、Receiptを保持します。
 
 実行は決定的な順序で逐次・fail-fastです。後続actionまたはpost-validationが失敗した場合、適用済みactionを逆順rollbackします。新規sidecarは生成bytesが変わっていない場合だけ削除し、stale sidecarは削除前にpackage・Git repository外のbackup rootへExecution専用session directoryを新規作成して退避し、targetが空の場合だけ復元します。backup先の既存file・symlink・junctionは上書き・追跡せず失敗させます。他processが変更・作成したfileも上書き・削除せず`rollback-failed`にします。ManifestとMarkdownは変更しません。
 
-終了コードは全action成功またはaction 0件が`0`、TOCTOU・mutation・post-validation・rollback failureが`1`、CLI/schema/binding/report path/report書込みerrorが`2`です。Execution Report書込みはmutation後の独立処理であり、report書込み失敗だけを理由に成功済みpackage変更をrollbackしません。reportには相対POSIX pathとdigestだけを記録し、backup絶対path、timestamp、username、hostname、cwd、command line、tracebackを含めません。
+終了コードは全action成功またはaction 0件が`0`、TOCTOU・mutation・post-validation・rollback failureが`1`、CLI/schema/binding/Receipt/report path/report書込みerrorが`2`です。Execution Report書込みはmutation後の独立処理であり、report書込み失敗だけを理由に成功済みpackage変更をrollbackしません。receipted modeのReportだけが`intent_receipt`へschema version、`attempt_id`、Receipt exact bytes SHA-256を記録し、legacy Reportにはこのfieldを追加しません。Receiptはaction failure、rollback、final Report書込み失敗でも自動削除しません。reportには相対POSIX pathとdigestだけを記録し、backup絶対path、timestamp、username、hostname、cwd、command line、tracebackを含めません。
 
 ### Backup Session Manifest / read-only Inventory v1
 
@@ -271,7 +286,7 @@ source optionは各々複数回指定でき、Summaryの`sources`と`source_type
 
 ### Operation Intent Receipt v1
 
-Operation Intent Receipt v1は、将来のRepair Execution／Backup Cleanup統合で、承認済みの実行scopeをmutation開始前に固定するための共通contractです。現段階ではschema、parser、決定的なcreate-only writerだけを提供し、CLIやdestructive lifecycleには接続していません。
+Operation Intent Receipt v1は、Repair Execution／Backup Cleanupで承認済みの実行scopeをmutation開始前に固定するための共通contractです。Repair Executionではopt-in receipted modeへ接続済みで、Backup Cleanupにはまだ接続していません。
 
 ```json
 {
@@ -319,7 +334,7 @@ Repair binding順はArtifact Manifest、Repair Plan、Repair Approval、Repair P
 
 Receiptはexecution intentの証跡に限られ、execution、success、mutation、retry safetyの証明ではありません。timestamp、hostname、username、cwd、command line、absolute path、random UUID、Unicode format controlを含めません。既存entryはvalid Receiptでもforeign fileでも更新せず、directory、symlink、junction／reparse pointも拒否します。同一directoryのtemporary fileをflush／fsyncした後、hard-linkでcreate-only／no-clobber commitし、並行writerを上書きしません。
 
-PR1ではRepair Execution／Backup Cleanupへの接続、final reportとのpairing、orphan／stale検出、Operational Audit統合、Receipt cleanupを行いません。
+Repair Executionのfinal ReportはReceipt exact bytes SHA-256と`attempt_id`へbindingし、formal verifierがReceipt、Report、Manifest、Plan、Approval、Preflightのexact-byte bindingとaction scopeを再照合できます。Receiptはintent proof、final Reportはoutcome proofであり、Receipt単体はmutation、success、failure、retry safetyを証明しません。Backup Cleanupへの接続、orphan／stale検出、Operational Audit統合、Receipt cleanupは未実装です。
 
 ### Recursive conversion / include・exclude filters
 

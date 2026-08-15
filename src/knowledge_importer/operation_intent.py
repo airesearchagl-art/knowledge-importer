@@ -110,6 +110,14 @@ def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
+def validate_operation_intent_attempt_id(value: object) -> str:
+    """Return one valid operator correlation label without treating it as identity."""
+
+    if not isinstance(value, str) or _ATTEMPT_ID.fullmatch(value) is None:
+        raise ValueError("invalid Operation Intent attempt_id")
+    return value
+
+
 def _is_safe_relative_posix_path(value: object) -> bool:
     if not isinstance(value, str) or not value:
         return False
@@ -204,13 +212,13 @@ def parse_operation_intent_bytes(content: bytes) -> OperationIntentReceipt:
         and not isinstance(schema_version, bool)
         and schema_version == OPERATION_INTENT_SCHEMA_VERSION
         and isinstance(attempt_id, str)
-        and _ATTEMPT_ID.fullmatch(attempt_id) is not None
         and isinstance(operation_type, str)
         and operation_type in _BINDING_ORDER
         and isinstance(raw_bindings, list)
         and isinstance(raw_actions, list)
     ):
         raise ValueError("invalid Operation Intent Receipt schema")
+    attempt_id = validate_operation_intent_attempt_id(attempt_id)
 
     bindings = tuple(_parse_binding(value) for value in raw_bindings)
     if tuple(binding.artifact_type for binding in bindings) != _BINDING_ORDER[operation_type]:
