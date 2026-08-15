@@ -607,3 +607,65 @@ root safety確認後にInventory、Plan、Approvalを元file実bytesから再読
 Auditのaction順はApproval順と同じcanonical順です。statusは`deleted`、`failed`、`not-run`だけで、absolute path、username、hostname、cwd、command line、timestamp、tracebackを含めません。Auditはbackup root、package root、入力fileの外にある新規pathへだけ作成するimmutable execution recordです。既存のvalid Audit、foreign regular file、directory、symlink、junction／reparse point、読取り不能entryはcleanup開始前に拒否し、対象sessionを変更しません。再実行時は別のreport pathを指定します。
 
 書込みは同一directoryのtemporary fileをflush／fsyncした後、`os.link(..., follow_symlinks=False)`でcreate-only／no-clobber commitします。`Path.replace()`による既存finalの更新は行いません。cleanup後に別processがfinal pathを作成した場合、そのfileを保持してexit code `2`とし、削除済みsessionは復元しません。全action削除成功（0 actionを含む）は`0`、precondition／TOCTOU／部分削除／filesystem deletion失敗は`1`、CLI・schema・binding・report保護／書込み失敗は`2`です。自動retention、automatic cleanup、age／size／generation選択は実装しません。
+
+## Operational Audit Summary schema version 1
+
+`knowledge-importer audit --repair-execution PATH... --backup-cleanup-audit PATH... --report-json PATH`は、Repair Execution Report v1とBackup Cleanup Audit v1を変更せずに統一監査形式へ集約します。source optionは各々複数回指定でき、合計1件以上を必須とします。source pathやpackage rootはreportへ記録しません。
+
+```json
+{
+  "report_type": "knowledge-importer-operational-audit",
+  "schema_version": 1,
+  "summary": {
+    "operations": 1,
+    "succeeded": 1,
+    "partial": 0,
+    "failed": 0,
+    "rolled_back": 0,
+    "not_run": 0,
+    "operator_action_required": 0,
+    "package_change_observed": true
+  },
+  "sources": [
+    {
+      "source_type": "repair-execution",
+      "schema_version": 1,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "operations": [
+    {
+      "source_type": "repair-execution",
+      "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "source_action_index": 0,
+      "action": "repair-regenerate-sidecar",
+      "target": "section/a.metadata.json",
+      "mutation_scope": "package",
+      "source_status": "succeeded",
+      "outcome": "succeeded",
+      "before": {"exists": false, "bytes": null, "sha256": null},
+      "after": {
+        "exists": true,
+        "bytes": 123,
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "rollback": "available",
+      "package_change": "changed",
+      "operator_action_required": false,
+      "reason": "completed"
+    }
+  ]
+}
+```
+
+source fileはstableなregular fileとして読取り、schema version 1と既知semanticを検証します。future schema version、既知fieldの不正値、unsafe相対pathを拒否します。元source bytesのSHA-256を記録し、完全に同じbytesを複数指定した場合は拒否します。source順は`(source_type, sha256)`、operation順はそのcanonical source順の後にsource report内の元action順とします。`source_action_index`は元reportの0-based indexであり、集約時に振り直しません。
+
+Repair statusは`succeeded → succeeded`、`rolled-back → rolled_back`、`rollback-failed → partial`、`not-run → not_run`、`failed-precondition → failed`へ正規化します。`failed`で完全なbefore／after digestが変更を証明する場合だけ`partial`とし、証明できなければ`failed / source-failure-mutation-unknown`です。Cleanupは`deleted → succeeded`、`failed → failed`、`not-run → not_run`であり、`failed`を`partial`とは推測しません。reasonは`completed / rolled-back / rollback-failed / precondition-failed / execution-failed / cleanup-failed / not-run / source-failure-mutation-unknown`の固定値です。
+
+`package_change`はRepair sourceに完全なexists／bytes／SHA-256証跡がある場合だけ`changed`または`unchanged`、それ以外は`unknown`です。Backup Cleanupはmutation scopeがbackupなので常にpackage changeを`unknown`とし、packageが不変だったとは推測しません。summaryの`package_change_observed`は1件でも`changed`なら`true`、全operationが証拠付き`unchanged`なら`false`、operation 0件またはunknownを含む場合は`null`です。
+
+before／afterにはsource reportに存在するdigest、count、exists evidenceだけを写し、欠けた情報を補完しません。timestamp、duration、hostname、username、cwd、command line、source absolute path、traceback、Unicode category Cfを含めません。UTF-8、2-space indent、trailing newlineで決定的に生成します。
+
+`--report-json`はsourceとは異なる新規pathだけを許可します。既存regular file、directory、symlink、junction／reparse point、読取り不能entryを拒否し、temporary fileのflush／fsync後に`os.link(..., follow_symlinks=False)`でcreate-only／no-clobber commitします。並行writerがfinal pathを先に作った場合はそのentryを保持して終了コード`2`です。source valid時の集約成功はoperation outcomeにかかわらず`0`、入力／schema／output／write errorは`2`です。package、backup、source reportへのmutation、destructive action、operation再実行は行いません。
+
+このschemaはsource reportが存在する時点の証跡を集約するもので、失われたRepair Execution ReportやCleanup Auditを再構築しません。Audit Summary自身とsource bytesを後から再照合する独立`audit-verify`、Intent Receipt、automatic retentionは別scopeです。

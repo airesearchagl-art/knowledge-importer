@@ -240,6 +240,23 @@ Cleanup Approval schema version 1はPlan fileの実bytes SHA-256へbindingし、
 
 Cleanup Audit schema version 1はInventory、Plan、Approvalの各実bytes SHA-256、`planned / deleted / failed / not_run`件数、session相対名、削除前files／bytes／tree SHA-256、削除後存在有無だけを記録します。absolute path、username、hostname、cwd、command line、timestamp、tracebackは含めません。Auditはbackup rootとpackage rootの外にある新規pathだけへ出力できるimmutable execution recordです。既存のvalid Audit、foreign file、directory、symlink、junction／reparse point、読取り不能entryはcleanup開始前に拒否します。同一directoryのtemporary fileをfsyncした後、hard-link commitでcreate-only／no-clobber作成し、並行して作成されたfileを上書きしません。再実行時は別のreport pathを指定します。全削除成功は`0`、precondition／TOCTOU／部分削除を含むaction失敗は`1`、CLI・schema・binding・Audit書込み失敗は`2`です。cleanup成功後にAudit書込みが競合・失敗してもbackup sessionを復元しません。自動retentionと自動cleanupは対象外です。
 
+### Operational Audit Summary v1
+
+既存のRepair Execution Report v1とBackup Cleanup Audit v1を、sourceを変更せず1つの機械可読な監査summaryへ集約できます。
+
+```powershell
+uv run knowledge-importer audit `
+  --repair-execution .\reports\repair-execution.json `
+  --backup-cleanup-audit .\reports\backup-cleanup-audit.json `
+  --report-json .\reports\operational-audit.json
+```
+
+2種類のsource optionはそれぞれ複数回指定でき、合計1件以上が必要です。sourceはschema version 1としてsemantic validationし、元file実bytesのSHA-256へbindingします。同一bytesのsourceは重複として拒否します。sourceは`source_type / sha256`、operationはcanonical source順と元reportのaction順で決定的に出力し、`source_action_index`を振り直しません。
+
+outcomeは`succeeded / partial / failed / rolled_back / not_run`へ正規化します。Repairの`rollback-failed`は`partial`、Cleanupの`failed`はmutationを推測せず`failed`です。package変更はsourceに完全な前後digest証跡がある場合だけ`changed / unchanged`とし、それ以外は`unknown`です。Cleanupだけからpackage非変更を推測しません。失敗・rollback・not-runは変換やcleanupを再実行せず、operator確認が必要な状態として集計します。
+
+出力はUTF-8、2-space indent、trailing newlineで、timestamp、hostname、username、cwd、command line、absolute path、traceback、Unicode format controlを含めません。`--report-json`は新規pathだけを許可し、同一directoryのtemporary fileをfsync後、hard-linkでcreate-only／no-clobber作成します。既存entryや並行writerを上書きしません。valid sourceの集約はoperation結果にかかわらず終了コード`0`、source／schema／出力境界／書込みerrorは`2`です。Auditはread-onlyで、package、backup、既存reportを変更しません。source report自体が失われた場合は再構築できず、独立した`audit-verify`とIntent Receiptは今回の範囲外です。
+
 ### Recursive conversion / include・exclude filters
 
 ```powershell

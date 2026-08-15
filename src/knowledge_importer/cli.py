@@ -73,6 +73,12 @@ from knowledge_importer.models import (
     KnowledgeImporterError,
     OutputExistsError,
 )
+from knowledge_importer.operational_audit import (
+    OperationalAuditInputError,
+    build_operational_audit,
+    validate_operational_audit_output_path,
+    write_operational_audit,
+)
 from knowledge_importer.package_validation import (
     ValidationSeverity,
     validate_package,
@@ -505,6 +511,33 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="AUDIT_JSON",
         required=True,
         help="新規pathへcreate-onlyで作成するCleanup Audit v1",
+    )
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="repair／backup operation reportをread-only集約",
+    )
+    audit_parser.add_argument(
+        "--repair-execution",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help="Repair Execution Report v1（複数指定可）",
+    )
+    audit_parser.add_argument(
+        "--backup-cleanup-audit",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help="Backup Cleanup Audit v1（複数指定可）",
+    )
+    audit_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="PATH",
+        required=True,
+        help="新規pathへcreate-onlyで作成するOperational Audit Summary v1",
     )
     return parser
 
@@ -1005,6 +1038,46 @@ def _run_backup_cleanup_execution(
     return audit.exit_code
 
 
+def _run_operational_audit(
+    *,
+    repair_execution_paths: Sequence[Path],
+    backup_cleanup_audit_paths: Sequence[Path],
+    report_json: Path,
+) -> int:
+    source_paths = (*repair_execution_paths, *backup_cleanup_audit_paths)
+    if not source_paths:
+        print("エラー: audit sourceを1件以上指定してください。", file=sys.stderr)
+        return 2
+    try:
+        if any(_paths_are_equal(path, report_json) for path in source_paths):
+            raise OperationalAuditInputError("source and output path conflict")
+        validate_operational_audit_output_path(report_json)
+        audit = build_operational_audit(
+            repair_execution_paths=repair_execution_paths,
+            backup_cleanup_audit_paths=backup_cleanup_audit_paths,
+        )
+    except (OSError, OperationalAuditInputError) as exc:
+        LOGGER.error("operational_audit_invalid exception_type=%s", type(exc).__name__)
+        print("Operational Auditの入力または出力先を検証できませんでした。", file=sys.stderr)
+        return 2
+    try:
+        write_operational_audit(report_json, audit)
+    except Exception as exc:  # noqa: BLE001 - output details remain sanitized.
+        LOGGER.error("operational_audit_write_failed exception_type=%s", type(exc).__name__)
+        print("Operational Auditを書き込めませんでした。", file=sys.stderr)
+        return 2
+    summary = audit.payload()["summary"]
+    assert isinstance(summary, dict)
+    print(
+        "Operational Audit: "
+        f"operations={summary['operations']} succeeded={summary['succeeded']} "
+        f"partial={summary['partial']} failed={summary['failed']} "
+        f"rolled_back={summary['rolled_back']} not_run={summary['not_run']} "
+        f"operator_action_required={summary['operator_action_required']}"
+    )
+    return 0
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -1071,6 +1144,12 @@ def run(
             inventory_path=args.inventory,
             plan_path=args.plan,
             approval_path=args.approval,
+            report_json=args.report_json,
+        )
+    if args.command == "audit":
+        return _run_operational_audit(
+            repair_execution_paths=args.repair_execution,
+            backup_cleanup_audit_paths=args.backup_cleanup_audit,
             report_json=args.report_json,
         )
     if (
