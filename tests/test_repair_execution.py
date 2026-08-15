@@ -121,6 +121,130 @@ def _args(
     ]
 
 
+def test_execution_report_bytes_parser_accepts_canonical_report(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+    content = (json.dumps(report.payload(), ensure_ascii=False, indent=2) + "\n").encode()
+
+    parsed = execution.parse_repair_execution_report_bytes(content)
+
+    assert parsed.payload() == report.payload()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rollback", "completed"),
+        ("status", "rollback-failed"),
+    ],
+)
+def test_execution_report_bytes_parser_rejects_invalid_status_rollback_semantics(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    ).payload()
+    report["actions"][0][field] = value
+
+    with pytest.raises(ValueError):
+        execution.parse_repair_execution_report_bytes(json.dumps(report).encode())
+
+
+def test_execution_report_bytes_parser_rejects_changed_not_run_state(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    ).payload()
+    action = report["actions"][0]
+    action["status"] = "not-run"
+    action["rollback"] = "not-required"
+    report["summary"] = {
+        "planned": 1,
+        "executed": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "rolled_back": 0,
+        "not_run": 1,
+    }
+
+    with pytest.raises(ValueError):
+        execution.parse_repair_execution_report_bytes(json.dumps(report).encode())
+
+
+def test_execution_report_bytes_parser_rejects_impossible_success_state(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    ).payload()
+    report["actions"][0]["before"] = report["actions"][0]["after"]
+
+    with pytest.raises(ValueError):
+        execution.parse_repair_execution_report_bytes(json.dumps(report).encode())
+
+
+@pytest.mark.parametrize(
+    ("location", "value"),
+    [
+        ("schema_version", 1.0),
+        ("planned", True),
+        ("path", "C:/private/item.metadata.json"),
+    ],
+)
+def test_execution_report_bytes_parser_enforces_field_types_and_safe_paths(
+    tmp_path: Path,
+    location: str,
+    value: object,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    ).payload()
+    if location == "schema_version":
+        report[location] = value
+    elif location == "planned":
+        report["summary"][location] = value
+    else:
+        report["actions"][0][location] = value
+
+    with pytest.raises(ValueError):
+        execution.parse_repair_execution_report_bytes(json.dumps(report).encode())
+
+
 def test_help_exposes_execution_contract(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as error:
         cli.run(["repair-execute", "--help"])

@@ -68,6 +68,33 @@ def _read_csv_report(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(report_file))
 
 
+def _write_empty_repair_execution(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "report_type": "knowledge-package-repair-execution",
+                "schema_version": 1,
+                "summary": {
+                    "planned": 0,
+                    "executed": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "rolled_back": 0,
+                    "not_run": 0,
+                },
+                "plan": {"sha256": "a" * 64},
+                "approval": {"sha256": "b" * 64},
+                "preflight": {"sha256": "c" * 64},
+                "post_validation": "not-run",
+                "actions": [],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_help_describes_convert_command() -> None:
     help_text = build_parser().format_help()
 
@@ -79,6 +106,7 @@ def test_help_describes_convert_command() -> None:
     assert "backup-cleanup-plan" in help_text
     assert "approve-backup-cleanup" in help_text
     assert "backup-cleanup-execute" in help_text
+    assert "audit" in help_text
     assert "knowledge-importer" in help_text
 
 
@@ -189,6 +217,96 @@ def test_backup_cleanup_execute_help_describes_bound_inputs(capsys: object) -> N
         "--report-json",
     ):
         assert option in help_text
+
+
+def test_audit_help_describes_repeatable_sources_and_output(capsys: object) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["audit", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "--repair-execution PATH" in help_text
+    assert "--backup-cleanup-audit PATH" in help_text
+    assert "--report-json PATH" in help_text
+
+
+def test_audit_requires_source_and_creates_no_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = tmp_path / "audit.json"
+
+    assert run(["audit", "--report-json", str(report)]) == 2
+
+    assert not report.exists()
+    assert "source" in capsys.readouterr().err
+
+
+def test_audit_command_writes_read_only_summary(tmp_path: Path) -> None:
+    source = tmp_path / "execution.json"
+    report = tmp_path / "audit.json"
+    _write_empty_repair_execution(source)
+    source_bytes = source.read_bytes()
+
+    exit_code = run(
+        [
+            "audit",
+            "--repair-execution",
+            str(source),
+            "--report-json",
+            str(report),
+        ]
+    )
+
+    assert exit_code == 0
+    assert source.read_bytes() == source_bytes
+    payload = _read_json_report(report)
+    assert payload["report_type"] == "knowledge-importer-operational-audit"
+    assert payload["summary"]["operations"] == 0
+
+
+def test_audit_rejects_existing_output_before_reading_source(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing_source = tmp_path / "private" / "missing.json"
+    report = tmp_path / "audit.json"
+    existing = b"foreign report\n"
+    report.write_bytes(existing)
+
+    exit_code = run(
+        [
+            "audit",
+            "--repair-execution",
+            str(missing_source),
+            "--report-json",
+            str(report),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert report.read_bytes() == existing
+    assert str(tmp_path) not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_audit_rejects_source_as_output_without_modification(tmp_path: Path) -> None:
+    source = tmp_path / "execution.json"
+    _write_empty_repair_execution(source)
+    before = source.read_bytes()
+
+    assert (
+        run(
+            [
+                "audit",
+                "--repair-execution",
+                str(source),
+                "--report-json",
+                str(source),
+            ]
+        )
+        == 2
+    )
+    assert source.read_bytes() == before
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:

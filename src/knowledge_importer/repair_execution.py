@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
+import unicodedata
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -58,6 +60,20 @@ from knowledge_importer.repair_preflight import (
 _SUPPORTED_ACTIONS = {
     RepairActionCategory.REGENERATE_SIDECAR,
     RepairActionCategory.REMOVE_STALE_SIDECAR,
+}
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
+_ACTION_REASONS = {
+    RepairActionCategory.REGENERATE_SIDECAR: "missing-sidecar",
+    RepairActionCategory.REMOVE_STALE_SIDECAR: "stale-sidecar",
+}
+_STATUS_ROLLBACK = {
+    "succeeded": "available",
+    "failed-precondition": "not-required",
+    "failed": "not-required",
+    "rolled-back": "completed",
+    "rollback-failed": "failed",
+    "not-run": "not-required",
 }
 
 
@@ -754,112 +770,144 @@ def write_execution_report(path: Path, report: RepairExecutionReport) -> None:
     write_json_atomically(path, report.payload())
 
 
+def _parse_execution_state(value: object, path: str) -> PreflightTarget:
+    if not isinstance(value, dict):
+        raise ValueError("invalid Repair Execution target state")
+    exists = value.get("exists")
+    size = value.get("bytes")
+    sha256 = value.get("sha256")
+    digest_valid = (
+        size is None
+        and sha256 is None
+        or isinstance(size, int)
+        and not isinstance(size, bool)
+        and size >= 0
+        and isinstance(sha256, str)
+        and _SHA256.fullmatch(sha256) is not None
+    )
+    if not isinstance(exists, bool) or not digest_valid or (not exists and size is not None):
+        raise ValueError("invalid Repair Execution target state")
+    return PreflightTarget(path, exists, size, sha256)
+
+
+def _execution_action_key(result: ExecutionActionResult) -> tuple[str, str, str]:
+    action = result.repair_action
+    return (
+        unicodedata.normalize("NFC", action.path).casefold(),
+        action.action.value,
+        action.reason_category,
+    )
+
+
+def parse_repair_execution_report_bytes(content: bytes) -> RepairExecutionReport:
+    """Parse and semantically validate a Repair Execution Report v1."""
+
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid Repair Execution Report JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("invalid Repair Execution Report root")
+    summary = payload.get("summary")
+    raw_actions = payload.get("actions")
+    bindings = tuple(payload.get(key) for key in ("plan", "approval", "preflight"))
+    schema_version = payload.get("schema_version")
+    post_validation = payload.get("post_validation")
+    if not (
+        payload.get("report_type") == "knowledge-package-repair-execution"
+        and schema_version == 1
+        and isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and isinstance(summary, dict)
+        and isinstance(raw_actions, list)
+        and all(isinstance(value, dict) for value in bindings)
+        and all(
+            isinstance(value.get("sha256"), str) and _SHA256.fullmatch(value["sha256"]) is not None
+            for value in bindings
+        )
+        and isinstance(post_validation, str)
+        and post_validation in {"passed", "failed", "not-run"}
+    ):
+        raise ValueError("invalid Repair Execution Report schema")
+
+    actions: list[ExecutionActionResult] = []
+    for value in raw_actions:
+        if not isinstance(value, dict):
+            raise ValueError("invalid Repair Execution action")
+        path_value = value.get("path")
+        action_value = value.get("action")
+        status = value.get("status")
+        rollback = value.get("rollback")
+        if (
+            not isinstance(path_value, str)
+            or not path_value
+            or "\\" in path_value
+            or _WINDOWS_DRIVE.match(path_value)
+            or any(unicodedata.category(character) in {"Cc", "Cf"} for character in path_value)
+        ):
+            raise ValueError("invalid Repair Execution action path")
+        path = PurePosixPath(path_value)
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("invalid Repair Execution action path")
+        try:
+            category = RepairActionCategory(action_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid Repair Execution action category") from exc
+        if (
+            category not in _SUPPORTED_ACTIONS
+            or not isinstance(status, str)
+            or _STATUS_ROLLBACK.get(status) != rollback
+        ):
+            raise ValueError("invalid Repair Execution action semantics")
+        before = _parse_execution_state(value.get("before"), path_value)
+        after = _parse_execution_state(value.get("after"), path_value)
+        if status == "succeeded" and (
+            category is RepairActionCategory.REGENERATE_SIDECAR
+            and (before.exists or not after.exists or after.sha256 is None)
+            or category is RepairActionCategory.REMOVE_STALE_SIDECAR
+            and (not before.exists or before.sha256 is None or after.exists)
+        ):
+            raise ValueError("invalid Repair Execution successful action state")
+        if status in {"failed-precondition", "not-run"} and before != after:
+            raise ValueError("invalid Repair Execution unchanged action state")
+        if status == "rolled-back" and before != after:
+            raise ValueError("invalid Repair Execution rollback state")
+        action = RepairAction(path_value, category, _ACTION_REASONS[category], True)
+        actions.append(ExecutionActionResult(action, status, before, after, rollback))
+
+    plan, approval, preflight = bindings
+    assert isinstance(plan, dict)
+    assert isinstance(approval, dict)
+    assert isinstance(preflight, dict)
+    report = RepairExecutionReport(
+        plan["sha256"],
+        approval["sha256"],
+        preflight["sha256"],
+        tuple(actions),
+        post_validation,
+    )
+    expected_summary = report.payload()["summary"]
+    if (
+        any(
+            not isinstance(summary.get(key), int)
+            or isinstance(summary.get(key), bool)
+            or summary.get(key) != value
+            for key, value in expected_summary.items()
+        )
+        or actions != sorted(actions, key=_execution_action_key)
+        or len({_execution_action_key(action) for action in actions}) != len(actions)
+    ):
+        raise ValueError("invalid Repair Execution summary or order")
+    return report
+
+
 def is_execution_report(path: Path) -> bool:
     """Return whether an existing regular file is an Execution Report v1."""
 
     if path.is_symlink() or not path.is_file():
         return False
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        parse_repair_execution_report_bytes(path.read_bytes())
+    except (OSError, ValueError):
         return False
-    if not isinstance(payload, dict):
-        return False
-    summary = payload.get("summary")
-    actions = payload.get("actions")
-    plan = payload.get("plan")
-    approval = payload.get("approval")
-    preflight = payload.get("preflight")
-    if not (
-        payload.get("report_type") == "knowledge-package-repair-execution"
-        and payload.get("schema_version") == 1
-        and not isinstance(payload.get("schema_version"), bool)
-        and isinstance(summary, dict)
-        and isinstance(actions, list)
-        and all(isinstance(value, dict) for value in (plan, approval, preflight))
-        and payload.get("post_validation") in {"passed", "failed", "not-run"}
-    ):
-        return False
-    assert isinstance(summary, dict)
-    assert isinstance(plan, dict)
-    assert isinstance(approval, dict)
-    assert isinstance(preflight, dict)
-    counts = tuple(
-        summary.get(key)
-        for key in ("planned", "executed", "succeeded", "failed", "rolled_back", "not_run")
-    )
-    if not (
-        all(
-            isinstance(value, int) and not isinstance(value, bool) and value >= 0
-            for value in counts
-        )
-        and counts[0] == len(actions)
-        and counts[1] + counts[5] == counts[0]
-        and all(
-            isinstance(container.get("sha256"), str)
-            and len(container["sha256"]) == 64
-            and all(character in "0123456789abcdef" for character in container["sha256"])
-            for container in (plan, approval, preflight)
-        )
-    ):
-        return False
-    valid_statuses = {
-        "succeeded",
-        "failed-precondition",
-        "failed",
-        "rolled-back",
-        "rollback-failed",
-        "not-run",
-    }
-    valid_rollbacks = {"not-required", "available", "completed", "failed"}
-    parsed_statuses: list[str] = []
-    for action in actions:
-        if not isinstance(action, dict):
-            return False
-        before = action.get("before")
-        after = action.get("after")
-        if not (
-            isinstance(action.get("path"), str)
-            and action.get("action") in {category.value for category in _SUPPORTED_ACTIONS}
-            and action.get("status") in valid_statuses
-            and action.get("rollback") in valid_rollbacks
-            and isinstance(before, dict)
-            and isinstance(after, dict)
-        ):
-            return False
-        path = PurePosixPath(action["path"])
-        if (
-            path.is_absolute()
-            or "\\" in action["path"]
-            or any(part in {"", ".", ".."} for part in path.parts)
-        ):
-            return False
-        for state in (before, after):
-            exists = state.get("exists")
-            size = state.get("bytes")
-            sha256 = state.get("sha256")
-            digest_valid = (
-                size is None
-                and sha256 is None
-                or isinstance(size, int)
-                and not isinstance(size, bool)
-                and size >= 0
-                and isinstance(sha256, str)
-                and len(sha256) == 64
-                and all(character in "0123456789abcdef" for character in sha256)
-            )
-            if not isinstance(exists, bool) or not digest_valid:
-                return False
-        parsed_statuses.append(action["status"])
-    expected_counts = (
-        len(parsed_statuses),
-        sum(status != "not-run" for status in parsed_statuses),
-        parsed_statuses.count("succeeded"),
-        sum(
-            status in {"failed-precondition", "failed", "rollback-failed"}
-            for status in parsed_statuses
-        ),
-        parsed_statuses.count("rolled-back"),
-        parsed_statuses.count("not-run"),
-    )
-    return counts == expected_counts
+    return True
