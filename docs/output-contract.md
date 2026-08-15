@@ -679,3 +679,63 @@ binding identityは`source_type + SHA-256(exact input bytes)`です。filename�
 stdoutは`sources_expected / sources_provided / matched / missing / unexpected / invalid / result`とbinding範囲を決定的に表示します。終了コードは全sourceのexact matchと再parse成功が`0`、binding mismatch／missing／unexpected／duplicate／tamperが`1`、CLI／Operational Audit schema／exact-bound source schema／I/O errorが`2`です。absolute path、username、hostname、cwd、command line、tracebackは出力しません。
 
 `source_binding=verified`は現在のsource bytesとSummary bindingだけを意味します。Repair Execution内のPlan／Approval／Preflight digest、Cleanup Audit内のInventory／Plan／Approval digestは元artifactが入力されないため、`internal_lifecycle_binding=not-provided`です。Summary、source、package、backupを変更せず、新しいreportも作成しません。Intent Receiptとautomatic retentionは別scopeです。
+
+## Operation Intent Receipt schema version 1
+
+Operation Intent Receipt v1は、将来のRepair ExecutionとBackup Cleanup Executionがmutation開始前に確定済みscopeを記録するための共通contractです。PR1ではschema、parser、deterministic create-only writerだけを提供し、CLIおよびdestructive lifecycleへは接続しません。Receiptは`execution intent evidence`だけを表し、execution proof、success proof、mutation proof、retry safety proofではありません。Receipt単体から実行済み、成功、失敗、package変更を推測してはなりません。
+
+```json
+{
+  "report_type": "knowledge-importer-operation-intent",
+  "schema_version": 1,
+  "attempt_id": "cleanup-attempt-001",
+  "operation_type": "backup-cleanup",
+  "bindings": [
+    {
+      "artifact_type": "backup-inventory",
+      "schema_version": 1,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "artifact_type": "backup-cleanup-plan",
+      "schema_version": 1,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "artifact_type": "backup-cleanup-approval",
+      "schema_version": 1,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    }
+  ],
+  "actions": [
+    {
+      "action_index": 0,
+      "action": "delete-backup-session",
+      "target": "knowledge-importer-repair-v1-example",
+      "reason_category": "explicit-retention-release",
+      "intent": "approved-for-execution"
+    }
+  ]
+}
+```
+
+### Identity and canonical semantics
+
+`attempt_id`はoperator-facing correlation labelであり、ASCII英数字から始まる1～64文字の`[A-Za-z0-9._-]`だけを許可します。path separator、control character、Unicode category Cfを拒否します。`attempt_id`はsecurity identityではなく、Receipt identityは有効なReceiptのexact file bytesに対するSHA-256です。retryは以前のReceiptを更新せず、新しい`attempt_id`と新しい出力pathを使います。同一semantic inputと同一`attempt_id`はbyte-identicalです。
+
+bindingはoperation typeごとに次の完全なsetと順序を要求し、各artifactはschema version 1およびlowercase 64-hex SHA-256を持ちます。
+
+- `repair-execution`: `artifact-manifest`、`repair-plan`、`repair-approval`、`repair-preflight`
+- `backup-cleanup`: `backup-inventory`、`backup-cleanup-plan`、`backup-cleanup-approval`
+
+actionは0から連続する`action_index`、既知のaction、safe relative POSIX target、既知のreason category、固定値`intent=approved-for-execution`を必須とします。Repairは`regenerate-sidecar / missing-sidecar`と`remove-stale-sidecar / stale-sidecar`だけを許可し、targetは`.metadata.json`です。Cleanupは`delete-backup-session / explicit-retention-release`だけを許可し、targetは単一のsession名です。actionはtargetのNFC・casefold比較、action、reason categoryの順でcanonicalに並べ、正規化後targetの重複を拒否します。
+
+Parserはrequired field、exact type、既知operation／artifact／action、schema version、digest、path、連続index、canonical順、duplicate、operation固有semanticを検証します。既知fieldの不正値とfuture schemaは拒否し、forward compatibilityのためunknown v1 fieldは無視します。
+
+### Deterministic immutable writer
+
+出力はUTF-8、2-space indent、trailing newlineで、timestamp、hostname、username、cwd、command line、absolute path、random UUID、traceback、Unicode category Cfを含めません。出力pathは新規entryだけを許可し、既存valid Receipt、foreign regular file、directory、symlink、junction／reparse point、検証不能entryを拒否します。
+
+writerは必要な親directoryを作成後、全path componentのlink／reparse safetyを再検証し、同一directoryのtemporary fileへ書き込んでflush／fsyncします。final commitは`os.link(..., follow_symlinks=False)`によるcreate-only／no-clobberであり、`Path.replace()`で既存entryを上書きしません。並行writerがfinal pathを先に作成した場合はそのentryを保持し、temporary fileだけをbest-effortで削除します。
+
+PR1はReceiptを生成するoperator CLI、Repair／Cleanup Execution integration、final reportのReceipt SHA-256 binding、Receipt pairing、orphan／stale／conflict scanner、Operational Audit integration、自動retention、Receipt cleanupを実装しません。既存のRepair Execution Report、Backup Cleanup Audit、Operational Auditその他schemaは変更しません。

@@ -48,6 +48,7 @@ EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/markdown_quality.py",
     "knowledge_importer/markdown_normalization.py",
     "knowledge_importer/models.py",
+    "knowledge_importer/operation_intent.py",
     "knowledge_importer/operational_audit.py",
     "knowledge_importer/package_validation.py",
     "knowledge_importer/quality_report.py",
@@ -240,6 +241,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
                 "knowledge_importer.backup_inventory, "
                 "knowledge_importer.json_writer, "
                 "knowledge_importer.markdown_quality, knowledge_importer.package_validation, "
+                "knowledge_importer.operation_intent, "
                 "knowledge_importer.operational_audit, "
                 "knowledge_importer.quality_report, knowledge_importer.repair_approval, "
                 "knowledge_importer.repair_execution, "
@@ -265,6 +267,7 @@ def test_readme_documents_every_public_batch_option() -> None:
     assert "backup-inventory" in readme
     assert "knowledge-importer audit" in readme
     assert "knowledge-importer audit-verify" in readme
+    assert "Operation Intent Receipt v1" in readme
     assert version("knowledge-importer") == "0.1.0"
 
 

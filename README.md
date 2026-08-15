@@ -267,7 +267,59 @@ uv run knowledge-importer audit-verify .\reports\operational-audit.json `
 
 source optionは各々複数回指定でき、Summaryの`sources`と`source_type + exact input bytes SHA-256`の完全一致を要求します。filename、path、mtime、parse後の再serialize結果ではbindingしません。exact match後はsourceを正式parseし、source actionから再構成したcanonical operation projectionとSummaryも比較します。source不足、余分なsource、同一sourceの重複、1 byteの改変は終了コード`1`、Summary／exact-bound sourceのschema・semantic不正やoperation不一致、I/O errorは`2`、全source・operation一致は`0`です。CLI指定順は結果へ影響せず、stdoutは件数と`source_binding=verified`を決定的に表示します。path等の機微情報やtracebackは表示しません。
 
-この確認が保証するのはSummaryと現在のsource bytesのbindingだけです。Repair内のPlan／Approval／Preflight、Cleanup内のInventory／Plan／Approvalは元artifactが入力されないため、`internal_lifecycle_binding=not-provided`と明示します。Summary、source、package、backupを変更せず、新しいreportも作成しません。Intent Receiptは未実装です。
+この確認が保証するのはSummaryと現在のsource bytesのbindingだけです。Repair内のPlan／Approval／Preflight、Cleanup内のInventory／Plan／Approvalは元artifactが入力されないため、`internal_lifecycle_binding=not-provided`と明示します。Summary、source、package、backupを変更せず、新しいreportも作成しません。
+
+### Operation Intent Receipt v1
+
+Operation Intent Receipt v1は、将来のRepair Execution／Backup Cleanup統合で、承認済みの実行scopeをmutation開始前に固定するための共通contractです。現段階ではschema、parser、決定的なcreate-only writerだけを提供し、CLIやdestructive lifecycleには接続していません。
+
+```json
+{
+  "report_type": "knowledge-importer-operation-intent",
+  "schema_version": 1,
+  "attempt_id": "repair-attempt-001",
+  "operation_type": "repair-execution",
+  "bindings": [
+    {
+      "artifact_type": "artifact-manifest",
+      "schema_version": 1,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "artifact_type": "repair-plan",
+      "schema_version": 1,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "artifact_type": "repair-approval",
+      "schema_version": 1,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "artifact_type": "repair-preflight",
+      "schema_version": 1,
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  ],
+  "actions": [
+    {
+      "action_index": 0,
+      "action": "regenerate-sidecar",
+      "target": "section/a.metadata.json",
+      "reason_category": "missing-sidecar",
+      "intent": "approved-for-execution"
+    }
+  ]
+}
+```
+
+`attempt_id`は1～64文字のASCII英数字で始まり、その後にASCII英数字、`-`、`_`、`.`だけを許すoperator向け相関labelです。security identityではなく、Receiptのidentityは有効なReceipt fileのexact bytesに対するSHA-256です。同一のsemantic inputと`attempt_id`はbyte-identicalになります。retryでは新しい`attempt_id`と新しい出力pathを使います。
+
+Repair binding順はArtifact Manifest、Repair Plan、Repair Approval、Repair Preflight、Cleanup binding順はBackup Inventory、Backup Cleanup Plan、Backup Cleanup Approvalに固定します。各actionは相対POSIX pathを持ち、targetのcanonical順、連続した0-based `action_index`、operation固有のaction／reason対応、target重複禁止を検証します。
+
+Receiptはexecution intentの証跡に限られ、execution、success、mutation、retry safetyの証明ではありません。timestamp、hostname、username、cwd、command line、absolute path、random UUID、Unicode format controlを含めません。既存entryはvalid Receiptでもforeign fileでも更新せず、directory、symlink、junction／reparse pointも拒否します。同一directoryのtemporary fileをflush／fsyncした後、hard-linkでcreate-only／no-clobber commitし、並行writerを上書きしません。
+
+PR1ではRepair Execution／Backup Cleanupへの接続、final reportとのpairing、orphan／stale検出、Operational Audit統合、Receipt cleanupを行いません。
 
 ### Recursive conversion / include・exclude filters
 
