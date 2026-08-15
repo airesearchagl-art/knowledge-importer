@@ -30,6 +30,7 @@ from knowledge_importer.backup_inventory import (
     BackupSessionState,
     is_link_or_reparse,
     path_is_within,
+    path_uses_link_or_reparse,
     transition_backup_session,
     write_backup_session_manifest,
 )
@@ -400,9 +401,10 @@ def _validate_receipted_mode(
         raise RepairExecutionInputError("receipted execution requires attempt_id and report")
     try:
         validate_operation_intent_attempt_id(attempt_id)
+        validate_receipted_execution_report_output_path(report_path)
         validate_operation_intent_output_path(intent_receipt_path)
     except ValueError as exc:
-        raise RepairExecutionInputError("invalid Operation Intent Receipt output") from exc
+        raise RepairExecutionInputError("invalid receipted execution output") from exc
     protected = (manifest_path, plan_path, approval_path, preflight_path, report_path)
     if (
         path_is_within(intent_receipt_path, package_root)
@@ -759,6 +761,13 @@ def execute_repair(
         )
         if _input_binding_identity(rebound_inputs) != _input_binding_identity(inputs):
             raise RepairExecutionInputError("execution inputs changed after Intent Receipt")
+        assert report_path is not None
+        try:
+            validate_receipted_execution_report_output_path(report_path)
+        except ValueError as exc:
+            raise RepairExecutionInputError(
+                "receipted Execution Report output changed after Intent Receipt"
+            ) from exc
         inputs = rebound_inputs
     results = _not_run_results(inputs.preflight)
     if not results:
@@ -890,10 +899,60 @@ def write_execution_report(path: Path, report: RepairExecutionReport) -> None:
     write_json_atomically(path, report.payload())
 
 
+def validate_receipted_execution_report_output_path(path: Path) -> None:
+    """Require a new, link-free path for one immutable receipted outcome."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if path_uses_link_or_reparse(path):
+            raise ValueError("unsafe receipted Execution Report output") from None
+        return
+    except OSError as exc:
+        raise ValueError("receipted Execution Report output cannot be verified") from exc
+    raise ValueError("receipted Execution Report output already exists")
+
+
 def repair_execution_report_bytes(report: RepairExecutionReport) -> bytes:
     """Serialize the exact deterministic bytes written by the shared JSON writer."""
 
     return (json.dumps(report.payload(), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def write_execution_report_create_only(path: Path, report: RepairExecutionReport) -> None:
+    """Create an immutable receipted outcome without replacing an existing entry."""
+
+    if report.intent_receipt is None:
+        raise ValueError("create-only Execution Report requires Intent Receipt binding")
+    try:
+        validate_receipted_execution_report_output_path(path)
+    except ValueError as exc:
+        raise OSError("unsafe receipted Execution Report output") from exc
+    content = repair_execution_report_bytes(report)
+    parse_repair_execution_report_bytes(content)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path_uses_link_or_reparse(path.parent) or not path.parent.is_dir():
+        raise OSError("unsafe receipted Execution Report output parent")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        if read_input_bytes(path) != content:
+            raise OSError("receipted Execution Report output verification failed")
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
 
 def _parse_execution_state(value: object, path: str) -> PreflightTarget:

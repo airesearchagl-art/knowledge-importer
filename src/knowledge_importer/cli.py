@@ -103,6 +103,7 @@ from knowledge_importer.repair_execution import (
     repair_execution_report_bytes,
     verify_repair_execution_intent,
     write_execution_report,
+    write_execution_report_create_only,
 )
 from knowledge_importer.repair_plan import (
     build_repair_plan,
@@ -873,15 +874,30 @@ def _run_repair_execution(
     if report_json is not None:
         try:
             if intent_receipt is not None:
+                receipt_content = read_input_bytes(intent_receipt)
+                manifest_content = read_input_bytes(manifest_path)
+                plan_content = read_input_bytes(plan_path)
+                approval_content = read_input_bytes(approval_path)
+                preflight_content = read_input_bytes(preflight_path)
                 verify_repair_execution_intent(
-                    read_input_bytes(intent_receipt),
+                    receipt_content,
                     repair_execution_report_bytes(report),
+                    manifest_content=manifest_content,
+                    plan_content=plan_content,
+                    approval_content=approval_content,
+                    preflight_content=preflight_content,
+                )
+                write_execution_report_create_only(report_json, report)
+                verify_repair_execution_intent(
+                    receipt_content,
+                    read_input_bytes(report_json),
                     manifest_content=read_input_bytes(manifest_path),
                     plan_content=read_input_bytes(plan_path),
                     approval_content=read_input_bytes(approval_path),
                     preflight_content=read_input_bytes(preflight_path),
                 )
-            write_execution_report(report_json, report)
+            else:
+                write_execution_report(report_json, report)
         except Exception as exc:  # noqa: BLE001 - report failure must not rollback mutations.
             LOGGER.error(
                 "repair_execution_report_write_failed exception_type=%s", type(exc).__name__

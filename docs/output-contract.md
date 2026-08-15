@@ -444,13 +444,13 @@ legacy modeでは上記fieldだけを維持します。`--intent-receipt PATH --
 
 ### Receipted Repair Execution mode
 
-`--intent-receipt`未指定時はlegacy CLI・Execution Report payloadを維持します。指定時は`--attempt-id`と`--report-json`が必須で、`--attempt-id`単独指定も終了コード`2`です。Receipt actionをCLIから指定する機能はなく、正式parse・binding検証済みのPlan／Approval／Preflightが確定したexecution scopeだけから生成します。
+`--intent-receipt`未指定時はlegacy CLI・Execution Report payloadと、既存の有効なExecution Reportをatomic更新できるwriter契約を維持します。指定時は`--attempt-id`と`--report-json`が必須で、`--attempt-id`単独指定も終了コード`2`です。Receipt actionをCLIから指定する機能はなく、正式parse・binding検証済みのPlan／Approval／Preflightが確定したexecution scopeだけから生成します。
 
-mutation前にManifest、Plan、Approval、Preflightをstable readし、schema、exact-byte binding、safe／ready action集合を確定します。そのscopeでRepair用canonical Receiptを構築し、create-only／no-clobber writerで保存した後、Receipt実bytesをstableに再readしてparserとSHA-256を再検証します。さらに4入力を再read／再bindingし、現在package preconditionと各actionのTOCTOU条件を検査してからmutationへ進みます。Receipt作成または再binding失敗はmutation 0件・終了コード`2`です。Receipt作成後にpackage preconditionが変わった場合はmutationせず、既存action failure semanticsに従って終了コード`1`とします。
+mutation前にManifest、Plan、Approval、Preflightをstable readし、schema、exact-byte binding、safe／ready action集合を確定します。そのscopeでRepair用canonical Receiptを構築し、create-only／no-clobber writerで保存した後、Receipt実bytesをstableに再readしてparserとSHA-256を再検証します。さらに4入力を再read／再bindingし、final Report pathが引き続き未使用であること、現在package precondition、各actionのTOCTOU条件を検査してからmutationへ進みます。Receipt作成または再binding失敗はmutation 0件・終了コード`2`です。Receipt作成後にpackage preconditionが変わった場合はmutationせず、既存action failure semanticsに従って終了コード`1`とします。
 
-Receipt pathはpackage root、明示`--backup-dir`、Manifest、Plan、Approval、Preflight、Execution Reportと重ねられません。既存entry、symlink、junction／reparse pointも拒否します。final Reportの`intent_receipt.sha256`はparse後payloadではなくReceipt exact file bytesに対するlowercase SHA-256であり、schema version 1とReceiptの`attempt_id`を保持します。formal verifierはReceipt／Reportの一致、Receipt operation type、4入力のexact-byte digest、Plan／Approval／Preflight binding、Receipt／Report action scopeを再検証します。
+Receipt pathはpackage root、明示`--backup-dir`、Manifest、Plan、Approval、Preflight、Execution Reportと重ねられません。Receiptとreceipted final Reportはいずれも新規pathだけを許可し、既存の有効なReport、foreign file、directory、symlink、junction／reparse pointをReceipt生成前に拒否します。final Reportはsame-directory temporary fileをflush／fsyncし、hard-linkでcreate-only／no-clobber commitします。並行writerがfinal pathを先に作成した場合はそのentryを保持します。final Reportの`intent_receipt.sha256`はparse後payloadではなくReceipt exact file bytesに対するlowercase SHA-256であり、schema version 1とReceiptの`attempt_id`を保持します。書込み後はactual Report bytesをstable readし、formal verifierがReceipt／Reportの一致、Receipt operation type、4入力のexact-byte digest、Plan／Approval／Preflight binding、Receipt／Report action scopeを再検証します。
 
-Receiptはintent proof、final Execution Reportはoutcome proofです。Receipt単体からmutation、success、failure、retry safetyを推測しません。action failure、rollback成功／失敗、final Report書込み失敗でもReceiptを保持し、自動削除しません。final Report書込み失敗時のpackage rollback規則はlegacy modeから変更しません。
+Receiptはintent proof、final Execution Reportはoutcome proofです。Receipt単体からmutation、success、failure、retry safetyを推測しません。action failure、rollback成功／失敗、final Report書込み失敗でもReceiptを保持し、自動削除しません。final Reportの競合・書込み・post-write検証失敗は終了コード`2`ですが、成功済みpackage mutationはrollbackしません。receipted modeのretryは新しいReceipt path、新しい`attempt_id`、新しいfinal Report pathを要求し、過去attemptのReport pathを再利用しません。
 
 ### TOCTOU, mutation, and post-validation
 
