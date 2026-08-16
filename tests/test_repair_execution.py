@@ -28,6 +28,11 @@ from knowledge_importer.document_metadata import (
     write_document_metadata,
 )
 from knowledge_importer.json_writer import write_json_atomically
+from knowledge_importer.operation_intent import (
+    REPAIR_EXECUTION,
+    operation_intent_sha256,
+    parse_operation_intent_bytes,
+)
 from knowledge_importer.package_validation import (
     PackageValidationResult,
     ValidationIssue,
@@ -118,6 +123,27 @@ def _args(
         str(approval),
         "--preflight",
         str(preflight),
+    ]
+
+
+def _receipted_args(
+    root: Path,
+    manifest: Path,
+    plan: Path,
+    approval: Path,
+    preflight: Path,
+    *,
+    receipt: Path,
+    report: Path,
+    attempt_id: str = "repair-attempt-001",
+) -> list[str]:
+    return _args(root, manifest, plan, approval, preflight) + [
+        "--intent-receipt",
+        str(receipt),
+        "--attempt-id",
+        attempt_id,
+        "--report-json",
+        str(report),
     ]
 
 
@@ -258,6 +284,8 @@ def test_help_exposes_execution_contract(capsys: pytest.CaptureFixture[str]) -> 
         "--preflight",
         "--report-json",
         "--backup-dir",
+        "--intent-receipt",
+        "--attempt-id",
     ):
         assert option in output
 
@@ -1239,3 +1267,800 @@ def test_stderr_and_report_do_not_expose_machine_details(
     assert str(tmp_path) not in combined
     assert "Traceback" not in combined
     assert "shuns" not in combined
+
+
+@pytest.mark.parametrize(
+    "receipt_options",
+    [
+        ["--attempt-id", "attempt-only"],
+        ["--intent-receipt", "receipt.json", "--report-json", "execution.json"],
+        ["--intent-receipt", "receipt.json", "--attempt-id", "missing-report"],
+        [
+            "--intent-receipt",
+            "receipt.json",
+            "--attempt-id",
+            "unsafe/id",
+            "--report-json",
+            "execution.json",
+        ],
+    ],
+)
+def test_receipted_mode_requires_complete_option_set(
+    tmp_path: Path,
+    receipt_options: list[str],
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+
+    assert cli.run(_args(root, manifest, plan, approval, preflight) + receipt_options) == 2
+    assert not (root / "section" / "a.metadata.json").exists()
+
+
+def test_receipted_regenerate_sidecar_binds_exact_receipt_and_scope(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt_path = tmp_path / "reports" / "intent.json"
+    report_path = tmp_path / "reports" / "execution.json"
+
+    exit_code = cli.run(
+        _receipted_args(
+            root,
+            manifest,
+            plan,
+            approval,
+            preflight,
+            receipt=receipt_path,
+            report=report_path,
+        )
+    )
+
+    receipt_bytes = receipt_path.read_bytes()
+    receipt = parse_operation_intent_bytes(receipt_bytes)
+    report = execution.parse_repair_execution_report_bytes(report_path.read_bytes())
+    assert exit_code == 0
+    assert receipt.operation_type == REPAIR_EXECUTION
+    assert [
+        (action.action, action.target, action.reason_category) for action in receipt.actions
+    ] == [("regenerate-sidecar", "section/a.metadata.json", "missing-sidecar")]
+    assert report.intent_receipt is not None
+    assert report.intent_receipt.attempt_id == "repair-attempt-001"
+    assert report.intent_receipt.sha256 == operation_intent_sha256(receipt_bytes)
+    execution.verify_repair_execution_intent(
+        receipt_bytes,
+        report_path.read_bytes(),
+        manifest_content=manifest.read_bytes(),
+        plan_content=plan.read_bytes(),
+        approval_content=approval.read_bytes(),
+        preflight_content=preflight.read_bytes(),
+    )
+
+
+def test_receipt_bytes_are_deterministic_for_same_scope_and_attempt(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, ())
+    first_receipt = tmp_path / "first-intent.json"
+    second_receipt = tmp_path / "second-intent.json"
+
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=first_receipt,
+                report=tmp_path / "first-execution.json",
+            )
+        )
+        == 0
+    )
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=second_receipt,
+                report=tmp_path / "second-execution.json",
+            )
+        )
+        == 0
+    )
+    assert first_receipt.read_bytes() == second_receipt.read_bytes()
+
+
+def test_legacy_execution_report_remains_without_intent_field(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, ())
+    report_path = tmp_path / "legacy-execution.json"
+
+    assert (
+        cli.run(
+            _args(root, manifest, plan, approval, preflight) + ["--report-json", str(report_path)]
+        )
+        == 0
+    )
+    assert "intent_receipt" not in json.loads(report_path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", True),
+        ("attempt_id", "unsafe/id"),
+        ("sha256", "A" * 64),
+    ],
+)
+def test_execution_report_parser_rejects_invalid_intent_binding(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, ())
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    ).payload()
+    report["intent_receipt"] = {
+        "schema_version": 1,
+        "attempt_id": "repair-attempt-001",
+        "sha256": "a" * 64,
+        field: value,
+    }
+
+    with pytest.raises(ValueError):
+        execution.parse_repair_execution_report_bytes(
+            (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode()
+        )
+
+
+def test_existing_receipt_is_not_overwritten_and_mutation_does_not_start(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(b"foreign intent\n")
+
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=tmp_path / "execution.json",
+            )
+        )
+        == 2
+    )
+    assert receipt.read_bytes() == b"foreign intent\n"
+    assert not (root / "section" / "a.metadata.json").exists()
+
+
+def test_concurrent_receipt_writer_is_preserved_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    foreign = b"concurrent intent\n"
+
+    def collide(path: Path, value: object) -> None:
+        path.write_bytes(foreign)
+        raise FileExistsError
+
+    monkeypatch.setattr(execution, "write_operation_intent", collide)
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=tmp_path / "execution.json",
+            )
+        )
+        == 2
+    )
+    assert receipt.read_bytes() == foreign
+    assert not (root / "section" / "a.metadata.json").exists()
+
+
+@pytest.mark.parametrize(
+    "collision",
+    ["package", "report", "manifest", "plan", "approval", "preflight", "backup"],
+)
+def test_receipt_path_collisions_are_rejected_before_mutation(
+    tmp_path: Path,
+    collision: str,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    report = tmp_path / "execution.json"
+    backup = tmp_path / "backup"
+    receipt = {
+        "package": root / "intent.json",
+        "report": report,
+        "manifest": manifest,
+        "plan": plan,
+        "approval": approval,
+        "preflight": preflight,
+        "backup": backup / "intent.json",
+    }[collision]
+    arguments = _receipted_args(
+        root,
+        manifest,
+        plan,
+        approval,
+        preflight,
+        receipt=receipt,
+        report=report,
+    )
+    if collision == "backup":
+        arguments += ["--backup-dir", str(backup)]
+
+    assert cli.run(arguments) == 2
+    assert not (root / "section" / "a.metadata.json").exists()
+
+
+def test_symlink_receipt_is_rejected_without_following_target(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"outside\n")
+    receipt = tmp_path / "intent.json"
+    try:
+        receipt.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=tmp_path / "execution.json",
+            )
+        )
+        == 2
+    )
+    assert outside.read_bytes() == b"outside\n"
+    assert not (root / "section" / "a.metadata.json").exists()
+
+
+@pytest.mark.parametrize("changed", ["plan", "approval", "preflight"])
+def test_input_tamper_after_receipt_stops_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: str,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    target = {"plan": plan, "approval": approval, "preflight": preflight}[changed]
+    original_writer = execution.write_operation_intent
+
+    def write_then_tamper(path: Path, value: object) -> None:
+        original_writer(path, value)  # type: ignore[arg-type]
+        target.write_bytes(target.read_bytes() + b" ")
+
+    monkeypatch.setattr(execution, "write_operation_intent", write_then_tamper)
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=tmp_path / "execution.json",
+            )
+        )
+        == 2
+    )
+    assert receipt.is_file()
+    assert not (root / "section" / "a.metadata.json").exists()
+
+
+def test_package_precondition_change_after_receipt_keeps_receipt_and_external_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    sidecar = root / "section" / "a.metadata.json"
+    original_writer = execution.write_operation_intent
+
+    def write_then_change_package(path: Path, value: object) -> None:
+        original_writer(path, value)  # type: ignore[arg-type]
+        sidecar.write_bytes(b"external sidecar\n")
+
+    monkeypatch.setattr(execution, "write_operation_intent", write_then_change_package)
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=tmp_path / "execution.json",
+            )
+        )
+        == 1
+    )
+    assert receipt.is_file()
+    assert sidecar.read_bytes() == b"external sidecar\n"
+
+
+def test_receipted_remove_stale_sidecar_succeeds_with_external_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    stale = _sidecar(root, item)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(item),))
+    receipt = tmp_path / "intent.json"
+    report = tmp_path / "execution.json"
+    backup = tmp_path / "backup"
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
+
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=report,
+            )
+            + ["--backup-dir", str(backup)]
+        )
+        == 0
+    )
+    assert receipt.is_file()
+    assert not stale.exists()
+
+
+@pytest.mark.parametrize("rollback_failure", [False, True])
+def test_receipt_is_retained_for_rollback_outcomes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rollback_failure: bool,
+) -> None:
+    root = tmp_path / "package"
+    stale_item = _item(root, "a/stale.md", status=ManifestStatus.SUCCEEDED)
+    stale = _sidecar(root, stale_item)
+    stale_before = stale.read_bytes()
+    missing = _item(root, "z/missing.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (_failed(stale_item), missing))
+    receipt = tmp_path / "intent.json"
+    report_path = tmp_path / "execution.json"
+    backup = tmp_path / "backup"
+    monkeypatch.setattr(execution, "_repository_roots", lambda package_root: ())
+
+    def fail_second(path: Path, sidecar: object) -> None:
+        if rollback_failure:
+            stale.write_bytes(b"external rollback conflict\n")
+        raise OSError
+
+    monkeypatch.setattr(execution, "_write_new_sidecar", fail_second)
+    exit_code = cli.run(
+        _receipted_args(
+            root,
+            manifest,
+            plan,
+            approval,
+            preflight,
+            receipt=receipt,
+            report=report_path,
+        )
+        + ["--backup-dir", str(backup)]
+    )
+
+    report = execution.parse_repair_execution_report_bytes(report_path.read_bytes())
+    assert exit_code == 1
+    assert receipt.is_file()
+    assert report.actions[0].status == ("rollback-failed" if rollback_failure else "rolled-back")
+    if rollback_failure:
+        assert stale.read_bytes() == b"external rollback conflict\n"
+    else:
+        assert stale.read_bytes() == stale_before
+
+
+def test_final_report_write_failure_retains_receipt_and_existing_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    monkeypatch.setattr(
+        cli,
+        "write_execution_report_create_only",
+        lambda path, report: (_ for _ in ()).throw(OSError("hidden path")),
+    )
+
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=tmp_path / "execution.json",
+            )
+        )
+        == 2
+    )
+    assert receipt.is_file()
+    assert (root / "section" / "a.metadata.json").is_file()
+
+
+@pytest.mark.parametrize("existing_kind", ["valid", "foreign", "directory", "symlink"])
+def test_receipted_existing_report_is_rejected_before_receipt_or_mutation(
+    tmp_path: Path,
+    existing_kind: str,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    report_path = tmp_path / "execution.json"
+    if existing_kind == "valid":
+        legacy_report = execution.RepairExecutionReport(
+            "a" * 64,
+            "b" * 64,
+            "c" * 64,
+            (),
+            "not-run",
+        )
+        execution.write_execution_report(report_path, legacy_report)
+    elif existing_kind == "foreign":
+        report_path.write_bytes(b"foreign report\n")
+    elif existing_kind == "directory":
+        report_path.mkdir()
+    else:
+        outside = tmp_path / "outside-report.json"
+        outside.write_bytes(b"outside report\n")
+        try:
+            report_path.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlink creation is not permitted")
+
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=report_path,
+            )
+        )
+        == 2
+    )
+    assert not receipt.exists()
+    assert not (root / "section" / "a.metadata.json").exists()
+
+
+def test_receipted_report_writer_does_not_clobber_concurrent_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, ())
+    report = execution.execute_repair(
+        root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+        preflight_path=preflight,
+    )
+    report = execution.RepairExecutionReport(
+        report.plan_sha256,
+        report.approval_sha256,
+        report.preflight_sha256,
+        report.actions,
+        report.post_validation,
+        execution.RepairExecutionIntentReceipt(1, "repair-attempt-001", "d" * 64),
+    )
+    report_path = tmp_path / "execution.json"
+    foreign = b"concurrent report\n"
+    original_link = execution.os.link
+
+    def create_final_then_link(source: Path, destination: Path, **kwargs: object) -> None:
+        Path(destination).write_bytes(foreign)
+        original_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(execution.os, "link", create_final_then_link)
+    with pytest.raises(OSError):
+        execution.write_execution_report_create_only(report_path, report)
+
+    assert report_path.read_bytes() == foreign
+    assert not list(tmp_path.glob(".execution.json.*.tmp"))
+
+
+def test_report_created_after_receipt_stops_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    report_path = tmp_path / "execution.json"
+    foreign = b"concurrent report before mutation\n"
+    original_writer = execution.write_operation_intent
+
+    def write_receipt_then_report(path: Path, value: object) -> None:
+        original_writer(path, value)  # type: ignore[arg-type]
+        report_path.write_bytes(foreign)
+
+    monkeypatch.setattr(execution, "write_operation_intent", write_receipt_then_report)
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=report_path,
+            )
+        )
+        == 2
+    )
+    assert receipt.is_file()
+    assert report_path.read_bytes() == foreign
+    assert not (root / "section" / "a.metadata.json").exists()
+
+
+def test_concurrent_receipted_report_is_preserved_after_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    report_path = tmp_path / "execution.json"
+    foreign = b"concurrent report\n"
+    original_writer = execution.write_execution_report_create_only
+
+    def collide(path: Path, report: execution.RepairExecutionReport) -> None:
+        path.write_bytes(foreign)
+        original_writer(path, report)
+
+    monkeypatch.setattr(cli, "write_execution_report_create_only", collide)
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=report_path,
+            )
+        )
+        == 2
+    )
+    assert report_path.read_bytes() == foreign
+    assert receipt.is_file()
+    assert (root / "section" / "a.metadata.json").is_file()
+
+
+def test_receipted_retry_requires_new_receipt_attempt_and_report_paths(tmp_path: Path) -> None:
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, ())
+    receipt_a = tmp_path / "intent-a.json"
+    receipt_b = tmp_path / "intent-b.json"
+    report_a = tmp_path / "execution-a.json"
+    report_b = tmp_path / "execution-b.json"
+
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt_a,
+                report=report_a,
+                attempt_id="repair-attempt-a",
+            )
+        )
+        == 0
+    )
+    report_a_before = report_a.read_bytes()
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt_b,
+                report=report_a,
+                attempt_id="repair-attempt-b",
+            )
+        )
+        == 2
+    )
+    assert not receipt_b.exists()
+    assert report_a.read_bytes() == report_a_before
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt_b,
+                report=report_b,
+                attempt_id="repair-attempt-b",
+            )
+        )
+        == 0
+    )
+
+
+def test_post_write_verifier_checks_actual_receipted_report_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "package"
+    item = _item(root, "section/a.md", status=ManifestStatus.SUCCEEDED)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, (item,))
+    receipt = tmp_path / "intent.json"
+    report_path = tmp_path / "execution.json"
+
+    def write_tampered_report(path: Path, report: execution.RepairExecutionReport) -> None:
+        payload = report.payload()
+        binding = payload["intent_receipt"]
+        assert isinstance(binding, dict)
+        binding["attempt_id"] = "different-valid-attempt"
+        write_json_atomically(path, payload)
+
+    monkeypatch.setattr(cli, "write_execution_report_create_only", write_tampered_report)
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=report_path,
+            )
+        )
+        == 2
+    )
+    assert receipt.is_file()
+    assert report_path.is_file()
+    assert (root / "section" / "a.metadata.json").is_file()
+
+
+@pytest.mark.parametrize("tamper", ["receipt", "report-attempt", "input"])
+def test_verifier_rejects_tampered_receipt_report_or_input(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    root = tmp_path / "package"
+    root.mkdir()
+    manifest, plan, approval, preflight = _contract(tmp_path, root, ())
+    receipt_path = tmp_path / "intent.json"
+    report_path = tmp_path / "execution.json"
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt_path,
+                report=report_path,
+            )
+        )
+        == 0
+    )
+    receipt_content = receipt_path.read_bytes()
+    report_content = report_path.read_bytes()
+    manifest_content = manifest.read_bytes()
+    if tamper == "receipt":
+        receipt_content += b" "
+    elif tamper == "report-attempt":
+        payload = json.loads(report_content.decode("utf-8"))
+        payload["intent_receipt"]["attempt_id"] = "different-attempt"
+        report_content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode()
+    else:
+        manifest_content += b" "
+
+    with pytest.raises(ValueError):
+        execution.verify_repair_execution_intent(
+            receipt_content,
+            report_content,
+            manifest_content=manifest_content,
+            plan_content=plan.read_bytes(),
+            approval_content=approval.read_bytes(),
+            preflight_content=preflight.read_bytes(),
+        )
+
+
+def test_receipted_outputs_do_not_expose_machine_context(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "private-user" / "package"
+    root.mkdir(parents=True)
+    manifest, plan, approval, preflight = _contract(tmp_path, root, ())
+    receipt = tmp_path / "intent.json"
+    report = tmp_path / "execution.json"
+
+    assert (
+        cli.run(
+            _receipted_args(
+                root,
+                manifest,
+                plan,
+                approval,
+                preflight,
+                receipt=receipt,
+                report=report,
+            )
+        )
+        == 0
+    )
+    output = capsys.readouterr()
+    combined = output.out + output.err + receipt.read_text() + report.read_text()
+    assert str(tmp_path) not in combined
+    assert "private-user" not in combined
+    assert "Traceback" not in combined
+    assert "timestamp" not in combined

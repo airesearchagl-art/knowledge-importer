@@ -430,6 +430,28 @@ Preflight v1は上記execution、backup、rollback、sidecar生成・削除、Ma
 }
 ```
 
+legacy modeでは上記fieldだけを維持します。`--intent-receipt PATH --attempt-id ID --report-json PATH`を指定したreceipted modeだけ、次のoptional fieldを追加します。
+
+```json
+{
+  "intent_receipt": {
+    "schema_version": 1,
+    "attempt_id": "repair-attempt-001",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  }
+}
+```
+
+### Receipted Repair Execution mode
+
+`--intent-receipt`未指定時はlegacy CLI・Execution Report payloadと、既存の有効なExecution Reportをatomic更新できるwriter契約を維持します。指定時は`--attempt-id`と`--report-json`が必須で、`--attempt-id`単独指定も終了コード`2`です。Receipt actionをCLIから指定する機能はなく、正式parse・binding検証済みのPlan／Approval／Preflightが確定したexecution scopeだけから生成します。
+
+mutation前にManifest、Plan、Approval、Preflightをstable readし、schema、exact-byte binding、safe／ready action集合を確定します。そのscopeでRepair用canonical Receiptを構築し、create-only／no-clobber writerで保存した後、Receipt実bytesをstableに再readしてparserとSHA-256を再検証します。さらに4入力を再read／再bindingし、final Report pathが引き続き未使用であること、現在package precondition、各actionのTOCTOU条件を検査してからmutationへ進みます。Receipt作成または再binding失敗はmutation 0件・終了コード`2`です。Receipt作成後にpackage preconditionが変わった場合はmutationせず、既存action failure semanticsに従って終了コード`1`とします。
+
+Receipt pathはpackage root、明示`--backup-dir`、Manifest、Plan、Approval、Preflight、Execution Reportと重ねられません。Receiptとreceipted final Reportはいずれも新規pathだけを許可し、既存の有効なReport、foreign file、directory、symlink、junction／reparse pointをReceipt生成前に拒否します。final Reportはsame-directory temporary fileをflush／fsyncし、hard-linkでcreate-only／no-clobber commitします。並行writerがfinal pathを先に作成した場合はそのentryを保持します。final Reportの`intent_receipt.sha256`はparse後payloadではなくReceipt exact file bytesに対するlowercase SHA-256であり、schema version 1とReceiptの`attempt_id`を保持します。書込み後はactual Report bytesをstable readし、formal verifierがReceipt／Reportの一致、Receipt operation type、4入力のexact-byte digest、Plan／Approval／Preflight binding、Receipt／Report action scopeを再検証します。
+
+Receiptはintent proof、final Execution Reportはoutcome proofです。Receipt単体からmutation、success、failure、retry safetyを推測しません。action failure、rollback成功／失敗、final Report書込み失敗でもReceiptを保持し、自動削除しません。final Reportの競合・書込み・post-write検証失敗は終了コード`2`ですが、成功済みpackage mutationはrollbackしません。receipted modeのretryは新しいReceipt path、新しい`attempt_id`、新しいfinal Report pathを要求し、過去attemptのReport pathを再利用しません。
+
 ### TOCTOU, mutation, and post-validation
 
 Execution開始時と各action直前に現在Preflightを再構築します。`regenerate-sidecar`はsidecar不存在、Manifest status succeeded/skipped、source digest、Markdown size・SHA-256、安全なmetadata pathを再確認し、既存Metadata Sidecar builderとatomic JSON writerで新規生成します。`remove-stale-sidecar`はfailed Manifest item、expected path、非symlink、Preflight target bytes・SHA-256を再確認してからbackupを作り、backup digest一致後だけtargetを削除します。Manifest、Markdown、Batch/Quality reportは変更しません。
@@ -682,7 +704,7 @@ stdoutは`sources_expected / sources_provided / matched / missing / unexpected /
 
 ## Operation Intent Receipt schema version 1
 
-Operation Intent Receipt v1は、将来のRepair ExecutionとBackup Cleanup Executionがmutation開始前に確定済みscopeを記録するための共通contractです。PR1ではschema、parser、deterministic create-only writerだけを提供し、CLIおよびdestructive lifecycleへは接続しません。Receiptは`execution intent evidence`だけを表し、execution proof、success proof、mutation proof、retry safety proofではありません。Receipt単体から実行済み、成功、失敗、package変更を推測してはなりません。
+Operation Intent Receipt v1は、Repair ExecutionとBackup Cleanup Executionがmutation開始前に確定済みscopeを記録するための共通contractです。Repair Executionはopt-in receipted modeで接続済み、Backup Cleanupは未接続です。Receiptは`execution intent evidence`だけを表し、execution proof、success proof、mutation proof、retry safety proofではありません。Receipt単体から実行済み、成功、失敗、package変更を推測してはなりません。
 
 ```json
 {
@@ -738,4 +760,4 @@ Parserはrequired field、exact type、既知operation／artifact／action、sch
 
 writerは必要な親directoryを作成後、全path componentのlink／reparse safetyを再検証し、同一directoryのtemporary fileへ書き込んでflush／fsyncします。final commitは`os.link(..., follow_symlinks=False)`によるcreate-only／no-clobberであり、`Path.replace()`で既存entryを上書きしません。並行writerがfinal pathを先に作成した場合はそのentryを保持し、temporary fileだけをbest-effortで削除します。
 
-PR1はReceiptを生成するoperator CLI、Repair／Cleanup Execution integration、final reportのReceipt SHA-256 binding、Receipt pairing、orphan／stale／conflict scanner、Operational Audit integration、自動retention、Receipt cleanupを実装しません。既存のRepair Execution Report、Backup Cleanup Audit、Operational Auditその他schemaは変更しません。
+Repair Execution integrationではoperatorがReceipt actionを自由指定するCLIを追加せず、既存execution scopeからのみ生成します。final Repair Execution Reportのoptional fieldはReceipt exact bytes SHA-256へbindingし、legacy Reportには追加されません。Backup Cleanup Execution integration、Receipt pairing、orphan／stale／conflict scanner、Operational Audit integration、自動retention、Receipt cleanupは実装しません。Backup Cleanup Audit、Operational Auditその他schemaは変更しません。

@@ -20,6 +20,7 @@ from knowledge_importer.artifact_manifest import (
     ManifestStatus,
     digest_file,
 )
+from knowledge_importer.backup_cleanup_plan import read_input_bytes
 from knowledge_importer.backup_inventory import (
     MANAGED_SESSION_PREFIX,
     SESSION_MANIFEST_FILENAME,
@@ -28,6 +29,8 @@ from knowledge_importer.backup_inventory import (
     BackupSessionManifest,
     BackupSessionState,
     is_link_or_reparse,
+    path_is_within,
+    path_uses_link_or_reparse,
     transition_backup_session,
     write_backup_session_manifest,
 )
@@ -37,6 +40,18 @@ from knowledge_importer.document_metadata import (
     build_document_metadata,
 )
 from knowledge_importer.json_writer import write_json_atomically
+from knowledge_importer.operation_intent import (
+    OPERATION_INTENT_SCHEMA_VERSION,
+    REPAIR_EXECUTION,
+    OperationIntentAction,
+    OperationIntentBinding,
+    OperationIntentReceipt,
+    operation_intent_sha256,
+    parse_operation_intent_bytes,
+    validate_operation_intent_attempt_id,
+    validate_operation_intent_output_path,
+    write_operation_intent,
+)
 from knowledge_importer.package_validation import (
     ManifestRecord,
     ManifestState,
@@ -101,12 +116,27 @@ class ExecutionActionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RepairExecutionIntentReceipt:
+    schema_version: int
+    attempt_id: str
+    sha256: str
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "attempt_id": self.attempt_id,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RepairExecutionReport:
     plan_sha256: str
     approval_sha256: str
     preflight_sha256: str
     actions: tuple[ExecutionActionResult, ...]
     post_validation: str
+    intent_receipt: RepairExecutionIntentReceipt | None = None
 
     @property
     def exit_code(self) -> int:
@@ -115,7 +145,7 @@ class RepairExecutionReport:
 
     def payload(self) -> dict[str, object]:
         statuses = [action.status for action in self.actions]
-        return {
+        payload: dict[str, object] = {
             "report_type": "knowledge-package-repair-execution",
             "schema_version": 1,
             "summary": {
@@ -135,6 +165,9 @@ class RepairExecutionReport:
             "post_validation": self.post_validation,
             "actions": [action.payload() for action in self.actions],
         }
+        if self.intent_receipt is not None:
+            payload["intent_receipt"] = self.intent_receipt.payload()
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,21 +257,22 @@ def _read_and_bind_inputs(
     preflight_path: Path,
 ) -> _ExecutionInputs:
     try:
-        manifest_digest_before = digest_file(manifest_path)
+        manifest_content = read_input_bytes(manifest_path)
         manifest = read_manifest_state(manifest_path)
-        manifest_digest_after = digest_file(manifest_path)
-        plan_content = plan_path.read_bytes()
-        approval_content = approval_path.read_bytes()
-        preflight_content = preflight_path.read_bytes()
+        manifest_content_after = read_input_bytes(manifest_path)
+        plan_content = read_input_bytes(plan_path)
+        approval_content = read_input_bytes(approval_path)
+        preflight_content = read_input_bytes(preflight_path)
         plan = parse_repair_plan_bytes(plan_content)
         approval = parse_repair_approval_bytes(approval_content)
         preflight = parse_repair_preflight_bytes(preflight_content)
     except (OSError, ValueError) as exc:
         raise RepairExecutionInputError("invalid execution input") from exc
 
-    if manifest_digest_before != manifest_digest_after or manifest_digest_before.sha256 is None:
+    if manifest_content != manifest_content_after:
         raise RepairExecutionInputError("Manifest changed while binding execution")
 
+    manifest_sha256 = _sha256(manifest_content)
     plan_sha256 = _sha256(plan_content)
     approval_sha256 = _sha256(approval_content)
     preflight_sha256 = _sha256(preflight_content)
@@ -265,12 +299,135 @@ def _read_and_bind_inputs(
     for action in preflight_actions:
         _find_record(manifest, action)
     return _ExecutionInputs(
-        manifest_digest_before.sha256,
+        manifest_sha256,
         plan_sha256,
         approval_sha256,
         preflight_sha256,
         preflight,
         manifest,
+    )
+
+
+def _input_binding_identity(inputs: _ExecutionInputs) -> tuple[str, str, str, str]:
+    return (
+        inputs.manifest_sha256,
+        inputs.plan_sha256,
+        inputs.approval_sha256,
+        inputs.preflight_sha256,
+    )
+
+
+def _repair_intent_bindings(inputs: _ExecutionInputs) -> tuple[OperationIntentBinding, ...]:
+    return (
+        OperationIntentBinding("artifact-manifest", 1, inputs.manifest_sha256),
+        OperationIntentBinding("repair-plan", 1, inputs.plan_sha256),
+        OperationIntentBinding("repair-approval", 1, inputs.approval_sha256),
+        OperationIntentBinding("repair-preflight", 1, inputs.preflight_sha256),
+    )
+
+
+def _repair_intent_actions(preflight: RepairPreflight) -> tuple[OperationIntentAction, ...]:
+    return tuple(
+        OperationIntentAction(
+            index,
+            action.repair_action.action.value,
+            action.repair_action.path,
+            action.repair_action.reason_category,
+        )
+        for index, action in enumerate(preflight.actions)
+    )
+
+
+def _build_repair_operation_intent(
+    inputs: _ExecutionInputs,
+    *,
+    attempt_id: str,
+) -> OperationIntentReceipt:
+    """Build the canonical Receipt from the already bound execution scope."""
+
+    return OperationIntentReceipt(
+        validate_operation_intent_attempt_id(attempt_id),
+        REPAIR_EXECUTION,
+        _repair_intent_bindings(inputs),
+        _repair_intent_actions(inputs.preflight),
+    )
+
+
+def _create_repair_operation_intent(
+    path: Path,
+    *,
+    inputs: _ExecutionInputs,
+    attempt_id: str,
+) -> RepairExecutionIntentReceipt:
+    receipt = _build_repair_operation_intent(inputs, attempt_id=attempt_id)
+    try:
+        write_operation_intent(path, receipt)
+        content = read_input_bytes(path)
+        if parse_operation_intent_bytes(content) != receipt:
+            raise ValueError("Operation Intent Receipt changed after creation")
+        sha256 = operation_intent_sha256(content)
+    except (OSError, ValueError) as exc:
+        raise RepairExecutionInputError("Operation Intent Receipt cannot be created") from exc
+    return RepairExecutionIntentReceipt(
+        OPERATION_INTENT_SCHEMA_VERSION,
+        receipt.attempt_id,
+        sha256,
+    )
+
+
+def _paths_are_equal(first: Path, second: Path) -> bool:
+    return (
+        str(first.resolve(strict=False)).casefold() == str(second.resolve(strict=False)).casefold()
+    )
+
+
+def _validate_receipted_mode(
+    package_root: Path,
+    *,
+    manifest_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+    preflight_path: Path,
+    report_path: Path | None,
+    backup_dir: Path | None,
+    intent_receipt_path: Path | None,
+    attempt_id: str | None,
+) -> None:
+    if intent_receipt_path is None:
+        if attempt_id is not None:
+            raise RepairExecutionInputError("attempt_id requires Operation Intent Receipt")
+        return
+    if attempt_id is None or report_path is None:
+        raise RepairExecutionInputError("receipted execution requires attempt_id and report")
+    try:
+        validate_operation_intent_attempt_id(attempt_id)
+        validate_receipted_execution_report_output_path(report_path)
+        validate_operation_intent_output_path(intent_receipt_path)
+    except ValueError as exc:
+        raise RepairExecutionInputError("invalid receipted execution output") from exc
+    protected = (manifest_path, plan_path, approval_path, preflight_path, report_path)
+    if (
+        path_is_within(intent_receipt_path, package_root)
+        or backup_dir is not None
+        and path_is_within(intent_receipt_path, backup_dir)
+        or any(_paths_are_equal(intent_receipt_path, path) for path in protected)
+    ):
+        raise RepairExecutionInputError("Operation Intent Receipt output conflicts")
+
+
+def _execution_report(
+    inputs: _ExecutionInputs,
+    actions: tuple[ExecutionActionResult, ...],
+    post_validation: str,
+    intent_receipt: RepairExecutionIntentReceipt | None,
+) -> RepairExecutionReport:
+    return RepairExecutionReport(
+        inputs.plan_sha256,
+        inputs.approval_sha256,
+        inputs.preflight_sha256,
+        actions,
+        post_validation,
+        intent_receipt,
     )
 
 
@@ -565,24 +722,56 @@ def execute_repair(
     approval_path: Path,
     preflight_path: Path,
     backup_dir: Path | None = None,
+    report_path: Path | None = None,
+    intent_receipt_path: Path | None = None,
+    attempt_id: str | None = None,
 ) -> RepairExecutionReport:
     """Execute the two approved v1 actions with fail-fast rollback."""
 
+    _validate_receipted_mode(
+        package_root,
+        manifest_path=manifest_path,
+        plan_path=plan_path,
+        approval_path=approval_path,
+        preflight_path=preflight_path,
+        report_path=report_path,
+        backup_dir=backup_dir,
+        intent_receipt_path=intent_receipt_path,
+        attempt_id=attempt_id,
+    )
     inputs = _read_and_bind_inputs(
         manifest_path=manifest_path,
         plan_path=plan_path,
         approval_path=approval_path,
         preflight_path=preflight_path,
     )
+    intent_receipt: RepairExecutionIntentReceipt | None = None
+    if intent_receipt_path is not None:
+        assert attempt_id is not None
+        intent_receipt = _create_repair_operation_intent(
+            intent_receipt_path,
+            inputs=inputs,
+            attempt_id=attempt_id,
+        )
+        rebound_inputs = _read_and_bind_inputs(
+            manifest_path=manifest_path,
+            plan_path=plan_path,
+            approval_path=approval_path,
+            preflight_path=preflight_path,
+        )
+        if _input_binding_identity(rebound_inputs) != _input_binding_identity(inputs):
+            raise RepairExecutionInputError("execution inputs changed after Intent Receipt")
+        assert report_path is not None
+        try:
+            validate_receipted_execution_report_output_path(report_path)
+        except ValueError as exc:
+            raise RepairExecutionInputError(
+                "receipted Execution Report output changed after Intent Receipt"
+            ) from exc
+        inputs = rebound_inputs
     results = _not_run_results(inputs.preflight)
     if not results:
-        return RepairExecutionReport(
-            inputs.plan_sha256,
-            inputs.approval_sha256,
-            inputs.preflight_sha256,
-            (),
-            "not-run",
-        )
+        return _execution_report(inputs, (), "not-run", intent_receipt)
 
     try:
         current = _current_preflight(
@@ -593,13 +782,7 @@ def execute_repair(
         )
     except Exception:  # noqa: BLE001 - current state became unverifiable.
         results[0].status = "failed-precondition"
-        return RepairExecutionReport(
-            inputs.plan_sha256,
-            inputs.approval_sha256,
-            inputs.preflight_sha256,
-            tuple(results),
-            "not-run",
-        )
+        return _execution_report(inputs, tuple(results), "not-run", intent_receipt)
     mismatches = [
         index
         for index, action in enumerate(inputs.preflight.actions)
@@ -607,13 +790,7 @@ def execute_repair(
     ]
     if mismatches:
         results[mismatches[0]].status = "failed-precondition"
-        return RepairExecutionReport(
-            inputs.plan_sha256,
-            inputs.approval_sha256,
-            inputs.preflight_sha256,
-            tuple(results),
-            "not-run",
-        )
+        return _execution_report(inputs, tuple(results), "not-run", intent_receipt)
 
     needs_backup = any(
         action.repair_action.action is RepairActionCategory.REMOVE_STALE_SIDECAR
@@ -632,13 +809,7 @@ def execute_repair(
                 if action.repair_action.action is RepairActionCategory.REMOVE_STALE_SIDECAR
             )
             results[first_stale].status = "failed"
-            return RepairExecutionReport(
-                inputs.plan_sha256,
-                inputs.approval_sha256,
-                inputs.preflight_sha256,
-                tuple(results),
-                "not-run",
-            )
+            return _execution_report(inputs, tuple(results), "not-run", intent_receipt)
     applied: list[_AppliedAction] = []
     for index, submitted in enumerate(inputs.preflight.actions):
         try:
@@ -651,36 +822,18 @@ def execute_repair(
         except Exception:  # noqa: BLE001 - fail-fast and rollback on unverifiable state.
             results[index].status = "failed-precondition"
             _rollback_with_session(applied, backup_session)
-            return RepairExecutionReport(
-                inputs.plan_sha256,
-                inputs.approval_sha256,
-                inputs.preflight_sha256,
-                tuple(results),
-                "not-run",
-            )
+            return _execution_report(inputs, tuple(results), "not-run", intent_receipt)
         if not _precondition_matches(submitted, current):
             results[index].status = "failed-precondition"
             _rollback_with_session(applied, backup_session)
-            return RepairExecutionReport(
-                inputs.plan_sha256,
-                inputs.approval_sha256,
-                inputs.preflight_sha256,
-                tuple(results),
-                "not-run",
-            )
+            return _execution_report(inputs, tuple(results), "not-run", intent_receipt)
 
         action = submitted.repair_action
         target = _resolve_target(package_root, action.path)
         if target is None:
             results[index].status = "failed-precondition"
             _rollback_with_session(applied, backup_session)
-            return RepairExecutionReport(
-                inputs.plan_sha256,
-                inputs.approval_sha256,
-                inputs.preflight_sha256,
-                tuple(results),
-                "not-run",
-            )
+            return _execution_report(inputs, tuple(results), "not-run", intent_receipt)
         record = _find_record(inputs.manifest, action)
         results[index].before = _target_state(target, action.path)
         try:
@@ -718,13 +871,7 @@ def execute_repair(
             results[index].status = "failed"
             _rollback_with_session(applied, backup_session)
             results[index].after = _target_state(target, action.path)
-            return RepairExecutionReport(
-                inputs.plan_sha256,
-                inputs.approval_sha256,
-                inputs.preflight_sha256,
-                tuple(results),
-                "not-run",
-            )
+            return _execution_report(inputs, tuple(results), "not-run", intent_receipt)
         results[index].status = "succeeded"
         results[index].rollback = "available"
         results[index].after = _target_state(target, action.path)
@@ -736,38 +883,76 @@ def execute_repair(
         post_validation_failed = True
     if post_validation_failed:
         _rollback_with_session(applied, backup_session)
-        return RepairExecutionReport(
-            inputs.plan_sha256,
-            inputs.approval_sha256,
-            inputs.preflight_sha256,
-            tuple(results),
-            "failed",
-        )
+        return _execution_report(inputs, tuple(results), "failed", intent_receipt)
     if backup_session is not None:
         try:
             _set_backup_session_state(backup_session, BackupSessionState.COMPLETE)
         except Exception:  # noqa: BLE001 - completion must be durably recorded.
             _rollback_with_session(applied, backup_session)
-            return RepairExecutionReport(
-                inputs.plan_sha256,
-                inputs.approval_sha256,
-                inputs.preflight_sha256,
-                tuple(results),
-                "failed",
-            )
-    return RepairExecutionReport(
-        inputs.plan_sha256,
-        inputs.approval_sha256,
-        inputs.preflight_sha256,
-        tuple(results),
-        "passed",
-    )
+            return _execution_report(inputs, tuple(results), "failed", intent_receipt)
+    return _execution_report(inputs, tuple(results), "passed", intent_receipt)
 
 
 def write_execution_report(path: Path, report: RepairExecutionReport) -> None:
     """Write Execution Report v1 atomically."""
 
     write_json_atomically(path, report.payload())
+
+
+def validate_receipted_execution_report_output_path(path: Path) -> None:
+    """Require a new, link-free path for one immutable receipted outcome."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if path_uses_link_or_reparse(path):
+            raise ValueError("unsafe receipted Execution Report output") from None
+        return
+    except OSError as exc:
+        raise ValueError("receipted Execution Report output cannot be verified") from exc
+    raise ValueError("receipted Execution Report output already exists")
+
+
+def repair_execution_report_bytes(report: RepairExecutionReport) -> bytes:
+    """Serialize the exact deterministic bytes written by the shared JSON writer."""
+
+    return (json.dumps(report.payload(), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def write_execution_report_create_only(path: Path, report: RepairExecutionReport) -> None:
+    """Create an immutable receipted outcome without replacing an existing entry."""
+
+    if report.intent_receipt is None:
+        raise ValueError("create-only Execution Report requires Intent Receipt binding")
+    try:
+        validate_receipted_execution_report_output_path(path)
+    except ValueError as exc:
+        raise OSError("unsafe receipted Execution Report output") from exc
+    content = repair_execution_report_bytes(report)
+    parse_repair_execution_report_bytes(content)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path_uses_link_or_reparse(path.parent) or not path.parent.is_dir():
+        raise OSError("unsafe receipted Execution Report output parent")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        if read_input_bytes(path) != content:
+            raise OSError("receipted Execution Report output verification failed")
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
 
 def _parse_execution_state(value: object, path: str) -> PreflightTarget:
@@ -799,6 +984,23 @@ def _execution_action_key(result: ExecutionActionResult) -> tuple[str, str, str]
     )
 
 
+def _parse_intent_receipt_binding(value: object) -> RepairExecutionIntentReceipt:
+    if not isinstance(value, dict):
+        raise ValueError("invalid Repair Execution Intent Receipt binding")
+    schema_version = value.get("schema_version")
+    sha256 = value.get("sha256")
+    if not (
+        isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and schema_version == OPERATION_INTENT_SCHEMA_VERSION
+        and isinstance(sha256, str)
+        and _SHA256.fullmatch(sha256) is not None
+    ):
+        raise ValueError("invalid Repair Execution Intent Receipt binding")
+    attempt_id = validate_operation_intent_attempt_id(value.get("attempt_id"))
+    return RepairExecutionIntentReceipt(schema_version, attempt_id, sha256)
+
+
 def parse_repair_execution_report_bytes(content: bytes) -> RepairExecutionReport:
     """Parse and semantically validate a Repair Execution Report v1."""
 
@@ -813,6 +1015,11 @@ def parse_repair_execution_report_bytes(content: bytes) -> RepairExecutionReport
     bindings = tuple(payload.get(key) for key in ("plan", "approval", "preflight"))
     schema_version = payload.get("schema_version")
     post_validation = payload.get("post_validation")
+    intent_receipt = (
+        _parse_intent_receipt_binding(payload["intent_receipt"])
+        if "intent_receipt" in payload
+        else None
+    )
     if not (
         payload.get("report_type") == "knowledge-package-repair-execution"
         and schema_version == 1
@@ -885,6 +1092,7 @@ def parse_repair_execution_report_bytes(content: bytes) -> RepairExecutionReport
         preflight["sha256"],
         tuple(actions),
         post_validation,
+        intent_receipt,
     )
     expected_summary = report.payload()["summary"]
     if (
@@ -899,6 +1107,92 @@ def parse_repair_execution_report_bytes(content: bytes) -> RepairExecutionReport
     ):
         raise ValueError("invalid Repair Execution summary or order")
     return report
+
+
+def verify_repair_execution_intent(
+    receipt_content: bytes,
+    report_content: bytes,
+    *,
+    manifest_content: bytes,
+    plan_content: bytes,
+    approval_content: bytes,
+    preflight_content: bytes,
+) -> None:
+    """Verify exact Receipt/report/input binding without inferring execution from intent."""
+
+    receipt = parse_operation_intent_bytes(receipt_content)
+    report = parse_repair_execution_report_bytes(report_content)
+    try:
+        manifest_payload = json.loads(manifest_content.decode("utf-8"))
+        plan = parse_repair_plan_bytes(plan_content)
+        approval = parse_repair_approval_bytes(approval_content)
+        preflight = parse_repair_preflight_bytes(preflight_content)
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("invalid Repair Execution Intent source") from exc
+    manifest_schema_version = (
+        manifest_payload.get("schema_version") if isinstance(manifest_payload, dict) else None
+    )
+    if not (
+        isinstance(manifest_payload, dict)
+        and manifest_payload.get("report_type") == "knowledge-artifact-manifest"
+        and isinstance(manifest_schema_version, int)
+        and not isinstance(manifest_schema_version, bool)
+        and manifest_schema_version == 1
+    ):
+        raise ValueError("invalid Repair Execution Intent Manifest")
+
+    plan_sha256 = _sha256(plan_content)
+    approval_sha256 = _sha256(approval_content)
+    preflight_sha256 = _sha256(preflight_content)
+    expected_bindings = (
+        OperationIntentBinding("artifact-manifest", 1, _sha256(manifest_content)),
+        OperationIntentBinding("repair-plan", 1, plan_sha256),
+        OperationIntentBinding("repair-approval", 1, approval_sha256),
+        OperationIntentBinding("repair-preflight", 1, preflight_sha256),
+    )
+    expected_actions = _repair_intent_actions(preflight)
+    expected_approved = tuple(
+        action
+        for action in plan.actions
+        if action.safe and action.action is not RepairActionCategory.MANUAL_REVIEW
+    )
+    preflight_actions = tuple(action.repair_action for action in preflight.actions)
+    canonical_preflight = (
+        json.dumps(preflight.payload(), ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    report_actions = tuple(
+        OperationIntentAction(
+            index,
+            action.repair_action.action.value,
+            action.repair_action.path,
+            action.repair_action.reason_category,
+        )
+        for index, action in enumerate(report.actions)
+    )
+    receipt_sha256 = operation_intent_sha256(receipt_content)
+    binding = report.intent_receipt
+    if not (
+        binding is not None
+        and binding.schema_version == OPERATION_INTENT_SCHEMA_VERSION
+        and binding.attempt_id == receipt.attempt_id
+        and binding.sha256 == receipt_sha256
+        and receipt.operation_type == REPAIR_EXECUTION
+        and receipt.bindings == expected_bindings
+        and receipt.actions == expected_actions
+        and report_actions == expected_actions
+        and report.plan_sha256 == plan_sha256
+        and report.approval_sha256 == approval_sha256
+        and report.preflight_sha256 == preflight_sha256
+        and approval.plan_sha256 == plan_sha256
+        and preflight.plan_sha256 == plan_sha256
+        and preflight.approval_sha256 == approval_sha256
+        and approval.approved_actions == expected_approved
+        and approval.approved_actions == preflight_actions
+        and preflight_content == canonical_preflight
+        and all(action.safe and action.action in _SUPPORTED_ACTIONS for action in preflight_actions)
+        and all(action.status == "ready" for action in preflight.actions)
+    ):
+        raise ValueError("Repair Execution Intent binding mismatch")
 
 
 def is_execution_report(path: Path) -> bool:
