@@ -661,7 +661,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--package-root",
         type=Path,
         metavar="PATH",
-        help="Repair orphan Receiptのcurrent package preconditionをread-only検証",
+        help="orphan Receiptのcurrent package preconditionをread-only検証",
+    )
+    intent_status_parser.add_argument(
+        "--backup-root",
+        type=Path,
+        metavar="PATH",
+        help="Cleanup orphan Receiptのcurrent backup preconditionをread-only検証",
     )
     return parser
 
@@ -1289,6 +1295,7 @@ def _run_intent_status(
     approval_path: Path | None,
     preflight_path: Path | None,
     package_root: Path | None,
+    backup_root: Path | None,
 ) -> int:
     try:
         status = inspect_operation_intent_status(
@@ -1301,6 +1308,7 @@ def _run_intent_status(
             approval_path=approval_path,
             preflight_path=preflight_path,
             package_root=package_root,
+            backup_root=backup_root,
         )
         content = operation_intent_status_bytes(status)
     except (IntentStatusInputError, ValueError) as exc:
@@ -1409,6 +1417,7 @@ def run(
             approval_path=args.approval,
             preflight_path=args.preflight,
             package_root=args.package_root,
+            backup_root=args.backup_root,
         )
     if (
         args.normalize_markdown is not None

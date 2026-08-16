@@ -629,6 +629,31 @@ def _validate_cleanup_roots(
         raise BackupCleanupExecutionInputError("unsafe cleanup backup root") from exc
 
 
+def backup_cleanup_current_state_matches(
+    package_root: Path,
+    backup_root: Path,
+    *,
+    inventory_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+) -> bool:
+    """Compare only approved sessions with current backup state, without mutation."""
+
+    backup_root_identity = _validate_cleanup_roots(package_root, backup_root)
+    inputs = _load_execution_inputs(inventory_path, plan_path, approval_path)
+    for action in inputs.actions:
+        expected = inputs.inventory_sessions[_comparison_key(action.session)]
+        try:
+            actual = _validate_actual_session(backup_root, action, expected)
+            _capture_session_directory_identities(backup_root / action.session, actual.items)
+            _capture_session_file_identities(backup_root / action.session, actual.items)
+        except _CleanupActionError:
+            return False
+    if _validate_cleanup_roots(package_root, backup_root) != backup_root_identity:
+        raise BackupCleanupExecutionInputError("cleanup backup root identity changed")
+    return True
+
+
 def _verify_receipted_output_state(
     receipt_path: Path,
     receipt_content: bytes,

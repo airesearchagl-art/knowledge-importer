@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+import knowledge_importer.backup_cleanup_execution as cleanup_execution_module
+import knowledge_importer.backup_inventory as backup_inventory_module
 import knowledge_importer.intent_status as intent_status_module
 from knowledge_importer.artifact_manifest import (
     ArtifactDigest,
@@ -18,7 +20,11 @@ from knowledge_importer.artifact_manifest import (
     digest_file,
     write_artifact_manifest,
 )
-from knowledge_importer.backup_cleanup_approval import BackupCleanupApproval
+from knowledge_importer.backup_cleanup_approval import (
+    BackupCleanupApproval,
+    build_backup_cleanup_approval,
+    write_backup_cleanup_approval,
+)
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAudit,
     BackupCleanupAuditAction,
@@ -27,8 +33,23 @@ from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAuditStatus,
     backup_cleanup_audit_bytes,
 )
-from knowledge_importer.backup_cleanup_plan import BackupCleanupPlan
-from knowledge_importer.backup_inventory import BackupInventory
+from knowledge_importer.backup_cleanup_plan import (
+    BackupCleanupPlan,
+    build_backup_cleanup_plan,
+    write_backup_cleanup_plan,
+)
+from knowledge_importer.backup_inventory import (
+    MANAGED_SESSION_PREFIX,
+    SESSION_MANIFEST_FILENAME,
+    BackupInventory,
+    BackupSessionBindings,
+    BackupSessionItem,
+    BackupSessionManifest,
+    BackupSessionState,
+    inspect_managed_backup_session,
+    write_backup_inventory,
+    write_backup_session_manifest,
+)
 from knowledge_importer.document_metadata import (
     DocumentMetadataSettings,
     build_document_metadata,
@@ -173,6 +194,123 @@ def _write_cleanup_lifecycle(tmp_path: Path) -> tuple[bytes, dict[str, Path]]:
         )
     )
     return receipt, paths
+
+
+def _create_managed_cleanup_session(
+    backup_root: Path,
+    suffix: str,
+    *,
+    content: bytes = b"synthetic selected backup\n",
+) -> tuple[Path, Path]:
+    session = backup_root / f"{MANAGED_SESSION_PREFIX}{suffix}"
+    backup = "0000/documents/item.metadata.json.bak"
+    backup_file = session / Path(*backup.split("/"))
+    backup_file.parent.mkdir(parents=True)
+    backup_file.write_bytes(content)
+    write_backup_session_manifest(
+        session / SESSION_MANIFEST_FILENAME,
+        BackupSessionManifest(
+            BackupSessionState.COMPLETE,
+            BackupSessionBindings("a" * 64, "b" * 64, "c" * 64, "d" * 64),
+            (
+                BackupSessionItem(
+                    "documents/item.metadata.json",
+                    backup,
+                    ArtifactDigest(len(content), hashlib.sha256(content).hexdigest()),
+                ),
+            ),
+        ),
+        expected_current=None,
+    )
+    return session, backup_file
+
+
+def _write_cleanup_current_lifecycle(
+    tmp_path: Path,
+) -> tuple[bytes, dict[str, Path], Path, Path, Path, Path]:
+    package_root = tmp_path / "package"
+    backup_root = tmp_path / "backups"
+    reports = tmp_path / "reports"
+    package_root.mkdir(parents=True)
+    backup_root.mkdir()
+    reports.mkdir()
+    session, backup_file = _create_managed_cleanup_session(backup_root, "current")
+    actual = inspect_managed_backup_session(session)
+
+    inventory = reports / "inventory.json"
+    plan = reports / "plan.json"
+    approval = reports / "approval.json"
+    write_backup_inventory(inventory, BackupInventory((actual,)))
+    write_backup_cleanup_plan(
+        plan,
+        build_backup_cleanup_plan(inventory, (session.name,)),
+    )
+    write_backup_cleanup_approval(approval, build_backup_cleanup_approval(plan))
+    paths = {
+        "inventory_path": inventory,
+        "plan_path": plan,
+        "approval_path": approval,
+    }
+    receipt = operation_intent_bytes(
+        OperationIntentReceipt(
+            "cleanup-current-001",
+            BACKUP_CLEANUP,
+            (
+                OperationIntentBinding("backup-inventory", 1, _sha256(inventory.read_bytes())),
+                OperationIntentBinding("backup-cleanup-plan", 1, _sha256(plan.read_bytes())),
+                OperationIntentBinding(
+                    "backup-cleanup-approval", 1, _sha256(approval.read_bytes())
+                ),
+            ),
+            (
+                OperationIntentAction(
+                    0,
+                    "delete-backup-session",
+                    session.name,
+                    "explicit-retention-release",
+                ),
+            ),
+        )
+    )
+    return receipt, paths, package_root, backup_root, session, backup_file
+
+
+def _cleanup_current_report(receipt_content: bytes, session: str) -> bytes:
+    receipt = parse_operation_intent_bytes(receipt_content)
+    bindings = {binding.artifact_type: binding.sha256 for binding in receipt.bindings}
+    return backup_cleanup_audit_bytes(
+        BackupCleanupAudit(
+            bindings["backup-inventory"],
+            bindings["backup-cleanup-plan"],
+            bindings["backup-cleanup-approval"],
+            (
+                BackupCleanupAuditAction(
+                    session,
+                    BackupCleanupAuditStatus.DELETED,
+                    BackupCleanupAuditBefore(1, 1, "e" * 64),
+                    False,
+                ),
+            ),
+            BackupCleanupAuditIntentReceipt(
+                1,
+                receipt.attempt_id,
+                operation_intent_sha256(receipt_content),
+            ),
+        )
+    )
+
+
+def _allow_cleanup_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(backup_inventory_module, "repository_roots", lambda path: ())
+    monkeypatch.setattr(cleanup_execution_module, "repository_roots", lambda path: ())
+
+
+def _snapshot_files(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 def _write_repair_current_lifecycle(
@@ -858,12 +996,12 @@ def test_package_root_requires_complete_repair_lifecycle_inputs(tmp_path: Path) 
         )
 
 
-def test_cleanup_receipt_rejects_repair_package_root_mode(tmp_path: Path) -> None:
+def test_cleanup_receipt_requires_complete_cleanup_root_mode(tmp_path: Path) -> None:
     receipt_content, lifecycle = _write_cleanup_lifecycle(tmp_path)
     receipt = tmp_path / "intent.json"
     receipt.write_bytes(receipt_content)
 
-    with pytest.raises(IntentStatusInputError, match="complete Repair lifecycle"):
+    with pytest.raises(IntentStatusInputError, match="complete Cleanup lifecycle"):
         inspect_operation_intent_status(
             receipt,
             package_root=tmp_path / "package",
@@ -1011,18 +1149,313 @@ def test_cleanup_orphan_with_complete_lifecycle_inputs_is_verified(tmp_path: Pat
     assert status.reason == FINAL_REPORT_MISSING
 
 
-def test_cleanup_status_cannot_claim_repair_current_preconditions(tmp_path: Path) -> None:
+def test_cleanup_orphan_current_selected_session_is_verified_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_cleanup_roots(monkeypatch)
+    receipt_content, lifecycle, package_root, backup_root, _, _ = _write_cleanup_current_lifecycle(
+        tmp_path
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    before = _snapshot_files(tmp_path)
+
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        backup_root=backup_root,
+        **lifecycle,
+    )
+    first = operation_intent_status_bytes(status)
+    second = operation_intent_status_bytes(status)
+
+    assert status.classification == ORPHAN
+    assert status.reason == FINAL_REPORT_MISSING
+    assert status.lifecycle_inputs == "verified"
+    assert status.current_preconditions == "verified"
+    assert status.operator_action_required
+    assert status.exit_code == 1
+    assert first == second
+    assert parse_operation_intent_status_bytes(first) == status
+    assert _snapshot_files(tmp_path) == before
+    output = first.decode("utf-8")
+    assert str(tmp_path) not in output
+    assert "C:\\Users\\" not in output
+    assert "Traceback" not in output
+    assert "timestamp" not in output
+    assert not any(unicodedata.category(character) == "Cf" for character in output)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "session-missing",
+        "manifest-changed",
+        "tree-extra-file",
+        "backup-byte-changed",
+        "backup-file-missing",
+    ],
+)
+def test_cleanup_selected_session_changes_are_current_precondition_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    _allow_cleanup_roots(monkeypatch)
+    receipt_content, lifecycle, package_root, backup_root, session, backup_file = (
+        _write_cleanup_current_lifecycle(tmp_path)
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    if change == "session-missing":
+        session.rename(tmp_path / "detached-session")
+    elif change == "manifest-changed":
+        manifest = session / SESSION_MANIFEST_FILENAME
+        manifest.write_bytes(manifest.read_bytes().replace(b"{", b"{ ", 1))
+    elif change == "tree-extra-file":
+        (session / "unexpected.bin").write_bytes(b"unexpected\n")
+    elif change == "backup-byte-changed":
+        backup_file.write_bytes(backup_file.read_bytes() + b"changed\n")
+    else:
+        backup_file.rename(tmp_path / "detached-backup.bak")
+    before = _snapshot_files(tmp_path)
+
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        backup_root=backup_root,
+        **lifecycle,
+    )
+
+    assert status.classification == ORPHAN
+    assert status.reason == FINAL_REPORT_MISSING
+    assert status.lifecycle_inputs == "verified"
+    assert status.current_preconditions == "mismatch"
+    assert status.exit_code == 1
+    assert parse_operation_intent_status_bytes(operation_intent_status_bytes(status)) == status
+    assert _snapshot_files(tmp_path) == before
+
+
+def test_cleanup_current_preconditions_ignore_unselected_root_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_cleanup_roots(monkeypatch)
+    receipt_content, lifecycle, package_root, backup_root, _, _ = _write_cleanup_current_lifecycle(
+        tmp_path
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    baseline = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        backup_root=backup_root,
+        **lifecycle,
+    )
+    _create_managed_cleanup_session(backup_root, "unrelated")
+    legacy_session = backup_root / "knowledge-importer-repair-legacy"
+    legacy_session.mkdir()
+    (legacy_session / "legacy.bak").write_bytes(b"legacy\n")
+    (backup_root / "unknown-root-entry.txt").write_bytes(b"unrelated\n")
+    before = _snapshot_files(tmp_path)
+
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        backup_root=backup_root,
+        **lifecycle,
+    )
+
+    assert baseline.current_preconditions == "verified"
+    assert status.current_preconditions == "verified"
+    assert _snapshot_files(tmp_path) == before
+
+
+def test_cleanup_selected_session_link_is_current_precondition_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_cleanup_roots(monkeypatch)
+    receipt_content, lifecycle, package_root, backup_root, _, backup_file = (
+        _write_cleanup_current_lifecycle(tmp_path)
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    detached = tmp_path / "detached-backup.bak"
+    backup_file.rename(detached)
+    try:
+        backup_file.symlink_to(detached)
+    except OSError:
+        detached.rename(backup_file)
+        pytest.skip("file symlink creation is unavailable")
+    before = _snapshot_files(tmp_path)
+
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        backup_root=backup_root,
+        **lifecycle,
+    )
+
+    assert status.classification == ORPHAN
+    assert status.lifecycle_inputs == "verified"
+    assert status.current_preconditions == "mismatch"
+    assert status.exit_code == 1
+    assert _snapshot_files(tmp_path) == before
+
+
+def test_zero_action_cleanup_current_preconditions_are_not_applicable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     receipt_content, lifecycle = _write_cleanup_lifecycle(tmp_path)
     receipt = tmp_path / "intent.json"
     receipt.write_bytes(receipt_content)
-    status = inspect_operation_intent_status(receipt, **lifecycle)
-    payload = status.payload()
-    bindings = payload["bindings"]
-    assert isinstance(bindings, dict)
-    bindings["current_preconditions"] = "verified"
 
-    with pytest.raises(ValueError, match="semantics"):
-        parse_operation_intent_status_bytes(_payload_bytes(payload))
+    def fail_if_called(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("zero-action intent must not inspect cleanup roots")
+
+    monkeypatch.setattr(
+        intent_status_module,
+        "backup_cleanup_current_state_matches",
+        fail_if_called,
+    )
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=tmp_path / "missing-package",
+        backup_root=tmp_path / "missing-backup",
+        **lifecycle,
+    )
+
+    assert status.classification == ORPHAN
+    assert status.reason == FINAL_REPORT_MISSING
+    assert status.lifecycle_inputs == "verified"
+    assert status.current_preconditions == "not-applicable"
+    assert status.operator_action_required
+    assert status.exit_code == 1
+    assert parse_operation_intent_status_bytes(operation_intent_status_bytes(status)) == status
+
+
+@pytest.mark.parametrize("state", ["paired", "conflicting", "stale"])
+def test_non_orphan_cleanup_status_does_not_inspect_current_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    receipt_content, lifecycle, package_root, backup_root, session, _ = (
+        _write_cleanup_current_lifecycle(tmp_path)
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    reports: tuple[Path, ...] = ()
+    if state in {"paired", "conflicting"}:
+        report = tmp_path / "audit.json"
+        report_content = _cleanup_current_report(receipt_content, session.name)
+        if state == "conflicting":
+            payload = json.loads(report_content.decode("utf-8"))
+            payload["intent_receipt"]["attempt_id"] = "cleanup-other-001"
+            report_content = _payload_bytes(payload)
+        report.write_bytes(report_content)
+        reports = (report,)
+    else:
+        lifecycle["inventory_path"].write_bytes(
+            lifecycle["inventory_path"].read_bytes().replace(b"{", b"{ ", 1)
+        )
+
+    def fail_if_called(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("non-orphan status must not inspect cleanup roots")
+
+    monkeypatch.setattr(
+        intent_status_module,
+        "backup_cleanup_current_state_matches",
+        fail_if_called,
+    )
+    status = inspect_operation_intent_status(
+        receipt,
+        backup_cleanup_audit_paths=reports,
+        package_root=package_root,
+        backup_root=backup_root,
+        **lifecycle,
+    )
+
+    assert status.classification == state
+    assert status.current_preconditions == "not-applicable"
+    assert parse_operation_intent_status_bytes(operation_intent_status_bytes(status)) == status
+
+
+@pytest.mark.parametrize("unsafe", ["missing", "overlap", "repository"])
+def test_unsafe_cleanup_roots_are_invalid_status_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe: str,
+) -> None:
+    _allow_cleanup_roots(monkeypatch)
+    receipt_content, lifecycle, package_root, backup_root, _, _ = _write_cleanup_current_lifecycle(
+        tmp_path
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    if unsafe == "missing":
+        backup_root = tmp_path / "missing-backup"
+    elif unsafe == "overlap":
+        backup_root = package_root
+    else:
+        monkeypatch.setattr(
+            cleanup_execution_module,
+            "repository_roots",
+            lambda path: (backup_root.resolve(),),
+        )
+
+    with pytest.raises(IntentStatusInputError):
+        inspect_operation_intent_status(
+            receipt,
+            package_root=package_root,
+            backup_root=backup_root,
+            **lifecycle,
+        )
+
+
+def test_linked_cleanup_backup_root_is_invalid_status_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_cleanup_roots(monkeypatch)
+    receipt_content, lifecycle, package_root, backup_root, _, _ = _write_cleanup_current_lifecycle(
+        tmp_path
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    linked_root = tmp_path / "linked-backups"
+    try:
+        linked_root.symlink_to(backup_root, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+
+    with pytest.raises(IntentStatusInputError):
+        inspect_operation_intent_status(
+            receipt,
+            package_root=package_root,
+            backup_root=linked_root,
+            **lifecycle,
+        )
+
+
+def test_cleanup_roots_require_complete_cleanup_lifecycle(tmp_path: Path) -> None:
+    receipt_content, lifecycle, package_root, backup_root, _, _ = _write_cleanup_current_lifecycle(
+        tmp_path
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+
+    with pytest.raises(IntentStatusInputError):
+        inspect_operation_intent_status(
+            receipt,
+            inventory_path=lifecycle["inventory_path"],
+            plan_path=lifecycle["plan_path"],
+            package_root=package_root,
+            backup_root=backup_root,
+        )
 
 
 def test_cleanup_orphan_with_action_scope_change_is_stale(tmp_path: Path) -> None:
@@ -1095,6 +1528,40 @@ def test_partial_or_wrong_lifecycle_inputs_are_invalid(tmp_path: Path) -> None:
         inspect_operation_intent_status(
             cleanup_receipt,
             plan_path=cleanup["plan_path"],
+        )
+
+
+@pytest.mark.parametrize("missing_root", ["package", "backup"])
+def test_cleanup_current_preconditions_require_both_roots(
+    tmp_path: Path,
+    missing_root: str,
+) -> None:
+    receipt_content, lifecycle, package_root, backup_root, _, _ = _write_cleanup_current_lifecycle(
+        tmp_path
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+
+    with pytest.raises(IntentStatusInputError, match="Cleanup roots"):
+        inspect_operation_intent_status(
+            receipt,
+            package_root=None if missing_root == "package" else package_root,
+            backup_root=None if missing_root == "backup" else backup_root,
+            **lifecycle,
+        )
+
+
+def test_repair_receipt_rejects_cleanup_root_set(tmp_path: Path) -> None:
+    receipt_content, lifecycle = _write_repair_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+
+    with pytest.raises(IntentStatusInputError, match="Repair package root"):
+        inspect_operation_intent_status(
+            receipt,
+            package_root=tmp_path / "package",
+            backup_root=tmp_path / "backups",
+            **lifecycle,
         )
 
 
