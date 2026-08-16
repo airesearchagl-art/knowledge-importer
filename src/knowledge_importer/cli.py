@@ -28,8 +28,10 @@ from knowledge_importer.backup_cleanup_approval import (
 )
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupExecutionInputError,
+    backup_cleanup_audit_bytes,
     execute_backup_cleanup,
     validate_backup_cleanup_audit_output_path,
+    verify_backup_cleanup_intent,
     write_backup_cleanup_audit,
 )
 from knowledge_importer.backup_cleanup_plan import (
@@ -527,6 +529,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="AUDIT_JSON",
         required=True,
         help="新規pathへcreate-onlyで作成するCleanup Audit v1",
+    )
+    backup_cleanup_execute_parser.add_argument(
+        "--intent-receipt",
+        type=Path,
+        metavar="PATH",
+        help="不可逆削除前にcreate-onlyで作成するOperation Intent Receipt v1",
+    )
+    backup_cleanup_execute_parser.add_argument(
+        "--attempt-id",
+        metavar="ID",
+        help="receipted cleanup attemptの安全な相関ラベル",
     )
     audit_parser = subparsers.add_parser(
         "audit",
@@ -1059,6 +1072,8 @@ def _run_backup_cleanup_execution(
     plan_path: Path,
     approval_path: Path,
     report_json: Path,
+    intent_receipt_path: Path | None,
+    attempt_id: str | None,
 ) -> int:
     inputs = (inventory_path, plan_path, approval_path)
     if not all(
@@ -1082,6 +1097,9 @@ def _run_backup_cleanup_execution(
             inventory_path=inventory_path,
             plan_path=plan_path,
             approval_path=approval_path,
+            report_path=report_json,
+            intent_receipt_path=intent_receipt_path,
+            attempt_id=attempt_id,
         )
     except BackupCleanupExecutionInputError as exc:
         LOGGER.error("backup_cleanup_execution_invalid exception_type=%s", type(exc).__name__)
@@ -1094,7 +1112,27 @@ def _run_backup_cleanup_execution(
     for action in audit.actions:
         print(f"Cleanup実行: session={action.session} status={action.status.value}")
     try:
+        if intent_receipt_path is not None:
+            receipt_content = read_input_bytes(intent_receipt_path)
+            inventory_content = read_input_bytes(inventory_path)
+            plan_content = read_input_bytes(plan_path)
+            approval_content = read_input_bytes(approval_path)
+            verify_backup_cleanup_intent(
+                receipt_content,
+                backup_cleanup_audit_bytes(audit),
+                inventory_content=inventory_content,
+                plan_content=plan_content,
+                approval_content=approval_content,
+            )
         write_backup_cleanup_audit(report_json, audit)
+        if intent_receipt_path is not None:
+            verify_backup_cleanup_intent(
+                receipt_content,
+                read_input_bytes(report_json),
+                inventory_content=inventory_content,
+                plan_content=plan_content,
+                approval_content=approval_content,
+            )
     except Exception as exc:  # noqa: BLE001 - deletion is never rolled back for report failure.
         LOGGER.error("backup_cleanup_audit_write_failed exception_type=%s", type(exc).__name__)
         print("Cleanup Auditを書き込めませんでした。", file=sys.stderr)
@@ -1240,6 +1278,8 @@ def run(
             plan_path=args.plan,
             approval_path=args.approval,
             report_json=args.report_json,
+            intent_receipt_path=args.intent_receipt,
+            attempt_id=args.attempt_id,
         )
     if args.command == "audit":
         return _run_operational_audit(

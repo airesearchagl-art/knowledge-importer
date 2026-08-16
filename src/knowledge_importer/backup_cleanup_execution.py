@@ -31,9 +31,22 @@ from knowledge_importer.backup_inventory import (
     inspect_managed_backup_session,
     is_link_or_reparse,
     parse_backup_inventory_bytes,
+    path_is_within,
     path_uses_link_or_reparse,
     repository_roots,
     validate_backup_root,
+)
+from knowledge_importer.operation_intent import (
+    BACKUP_CLEANUP,
+    OPERATION_INTENT_SCHEMA_VERSION,
+    OperationIntentAction,
+    OperationIntentBinding,
+    OperationIntentReceipt,
+    operation_intent_sha256,
+    parse_operation_intent_bytes,
+    validate_operation_intent_attempt_id,
+    validate_operation_intent_output_path,
+    write_operation_intent,
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -85,11 +98,26 @@ class BackupCleanupAuditAction:
 
 
 @dataclass(frozen=True, slots=True)
+class BackupCleanupAuditIntentReceipt:
+    schema_version: int
+    attempt_id: str
+    sha256: str
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "attempt_id": self.attempt_id,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BackupCleanupAudit:
     inventory_sha256: str
     plan_sha256: str
     approval_sha256: str
     actions: tuple[BackupCleanupAuditAction, ...]
+    intent_receipt: BackupCleanupAuditIntentReceipt | None = None
 
     @property
     def exit_code(self) -> int:
@@ -101,7 +129,7 @@ class BackupCleanupAudit:
 
     def payload(self) -> dict[str, object]:
         statuses = [action.status for action in self.actions]
-        return {
+        payload: dict[str, object] = {
             "report_type": "knowledge-importer-backup-cleanup-audit",
             "schema_version": 1,
             "bindings": {
@@ -117,6 +145,9 @@ class BackupCleanupAudit:
             },
             "actions": [action.payload() for action in self.actions],
         }
+        if self.intent_receipt is not None:
+            payload["intent_receipt"] = self.intent_receipt.payload()
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +169,10 @@ def _is_sha256(value: object) -> bool:
 
 def _is_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 
 def _entry_exists(path: Path) -> bool:
@@ -352,21 +387,18 @@ def _inventory_action_matches(
     )
 
 
-def _load_execution_inputs(
-    inventory_path: Path,
-    plan_path: Path,
-    approval_path: Path,
+def _parse_execution_inputs(
+    inventory_bytes: bytes,
+    plan_bytes: bytes,
+    approval_bytes: bytes,
 ) -> _ExecutionInputs:
     try:
-        inventory_bytes = read_input_bytes(inventory_path)
-        plan_bytes = read_input_bytes(plan_path)
-        approval_bytes = read_input_bytes(approval_path)
         inventory = parse_backup_inventory_bytes(inventory_bytes)
         plan = parse_backup_cleanup_plan_bytes(plan_bytes)
         approval = verify_backup_cleanup_approval(plan_bytes, approval_bytes)
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         raise BackupCleanupExecutionInputError("invalid cleanup execution input") from exc
-    inventory_sha256 = hashlib.sha256(inventory_bytes).hexdigest()
+    inventory_sha256 = _sha256(inventory_bytes)
     if plan.inventory_sha256 != inventory_sha256:
         raise BackupCleanupExecutionInputError("cleanup Inventory binding mismatch")
     sessions = {_comparison_key(session.session): session for session in inventory.sessions}
@@ -375,11 +407,173 @@ def _load_execution_inputs(
             raise BackupCleanupExecutionInputError("cleanup action does not match Inventory")
     return _ExecutionInputs(
         inventory_sha256,
-        hashlib.sha256(plan_bytes).hexdigest(),
-        hashlib.sha256(approval_bytes).hexdigest(),
+        _sha256(plan_bytes),
+        _sha256(approval_bytes),
         sessions,
         approval.approved_actions,
     )
+
+
+def _load_execution_inputs(
+    inventory_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+) -> _ExecutionInputs:
+    try:
+        return _parse_execution_inputs(
+            read_input_bytes(inventory_path),
+            read_input_bytes(plan_path),
+            read_input_bytes(approval_path),
+        )
+    except (OSError, ValueError) as exc:
+        raise BackupCleanupExecutionInputError("invalid cleanup execution input") from exc
+
+
+def _input_binding_identity(inputs: _ExecutionInputs) -> tuple[str, str, str]:
+    return inputs.inventory_sha256, inputs.plan_sha256, inputs.approval_sha256
+
+
+def _cleanup_intent_bindings(inputs: _ExecutionInputs) -> tuple[OperationIntentBinding, ...]:
+    return (
+        OperationIntentBinding("backup-inventory", 1, inputs.inventory_sha256),
+        OperationIntentBinding("backup-cleanup-plan", 1, inputs.plan_sha256),
+        OperationIntentBinding("backup-cleanup-approval", 1, inputs.approval_sha256),
+    )
+
+
+def _cleanup_intent_actions(
+    actions: tuple[BackupCleanupAction, ...],
+) -> tuple[OperationIntentAction, ...]:
+    return tuple(
+        OperationIntentAction(
+            index,
+            "delete-backup-session",
+            action.session,
+            "explicit-retention-release",
+        )
+        for index, action in enumerate(actions)
+    )
+
+
+def _create_cleanup_operation_intent(
+    path: Path,
+    *,
+    inputs: _ExecutionInputs,
+    attempt_id: str,
+) -> tuple[BackupCleanupAuditIntentReceipt, bytes]:
+    receipt = OperationIntentReceipt(
+        validate_operation_intent_attempt_id(attempt_id),
+        BACKUP_CLEANUP,
+        _cleanup_intent_bindings(inputs),
+        _cleanup_intent_actions(inputs.actions),
+    )
+    try:
+        write_operation_intent(path, receipt)
+        content = read_input_bytes(path)
+        if parse_operation_intent_bytes(content) != receipt:
+            raise ValueError("Operation Intent Receipt changed after creation")
+        digest = operation_intent_sha256(content)
+    except (OSError, ValueError) as exc:
+        raise BackupCleanupExecutionInputError(
+            "Operation Intent Receipt cannot be created"
+        ) from exc
+    return (
+        BackupCleanupAuditIntentReceipt(
+            OPERATION_INTENT_SCHEMA_VERSION,
+            receipt.attempt_id,
+            digest,
+        ),
+        content,
+    )
+
+
+def _paths_are_equal(first: Path, second: Path) -> bool:
+    return (
+        str(first.resolve(strict=False)).casefold() == str(second.resolve(strict=False)).casefold()
+    )
+
+
+def _validate_receipted_mode(
+    package_root: Path,
+    backup_root: Path,
+    *,
+    inventory_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+    report_path: Path | None,
+    intent_receipt_path: Path | None,
+    attempt_id: str | None,
+) -> None:
+    if intent_receipt_path is None:
+        if attempt_id is not None:
+            raise BackupCleanupExecutionInputError("attempt_id requires Operation Intent Receipt")
+        return
+    if attempt_id is None or report_path is None:
+        raise BackupCleanupExecutionInputError(
+            "receipted cleanup requires attempt_id and Cleanup Audit"
+        )
+    try:
+        validate_operation_intent_attempt_id(attempt_id)
+        validate_operation_intent_output_path(intent_receipt_path)
+        validate_backup_cleanup_audit_output_path(report_path)
+    except ValueError as exc:
+        raise BackupCleanupExecutionInputError("invalid receipted cleanup output") from exc
+    protected = (inventory_path, plan_path, approval_path, report_path)
+    try:
+        conflicts = (
+            path_is_within(intent_receipt_path, package_root)
+            or path_is_within(intent_receipt_path, backup_root)
+            or any(_paths_are_equal(intent_receipt_path, path) for path in protected)
+        )
+    except OSError as exc:
+        raise BackupCleanupExecutionInputError(
+            "Operation Intent Receipt output cannot be verified"
+        ) from exc
+    if conflicts:
+        raise BackupCleanupExecutionInputError("Operation Intent Receipt output conflicts")
+
+
+def _validate_cleanup_roots(
+    package_root: Path,
+    backup_root: Path,
+) -> tuple[int, int]:
+    try:
+        validate_backup_root(package_root, backup_root)
+        package_resolved = package_root.resolve()
+        backup_resolved = backup_root.resolve(strict=False)
+        overlaps_repository = any(
+            backup_resolved == root or backup_resolved.is_relative_to(root)
+            for root in repository_roots(backup_root)
+        )
+        package_inside_backup = package_resolved.is_relative_to(backup_resolved)
+    except (BackupInventoryInputError, OSError) as exc:
+        raise BackupCleanupExecutionInputError("unsafe cleanup backup root") from exc
+    if overlaps_repository or package_inside_backup:
+        raise BackupCleanupExecutionInputError("unsafe cleanup backup root")
+    try:
+        return _directory_identity(backup_root)
+    except _CleanupActionError as exc:
+        raise BackupCleanupExecutionInputError("unsafe cleanup backup root") from exc
+
+
+def _verify_receipted_output_state(
+    receipt_path: Path,
+    receipt_content: bytes,
+    receipt_binding: BackupCleanupAuditIntentReceipt,
+    report_path: Path,
+) -> None:
+    try:
+        validate_backup_cleanup_audit_output_path(report_path)
+        current_receipt_content = read_input_bytes(receipt_path)
+        if (
+            current_receipt_content != receipt_content
+            or operation_intent_sha256(current_receipt_content) != receipt_binding.sha256
+        ):
+            raise ValueError("Operation Intent Receipt changed")
+    except (OSError, ValueError) as exc:
+        raise BackupCleanupExecutionInputError(
+            "receipted cleanup output changed after Operation Intent Receipt"
+        ) from exc
 
 
 def _validate_actual_session(
@@ -519,6 +713,50 @@ def _before(action: BackupCleanupAction) -> BackupCleanupAuditBefore:
     )
 
 
+def _failed_precondition_audit(
+    inputs: _ExecutionInputs,
+    *,
+    failed_index: int,
+    backup_root: Path,
+    intent_receipt: BackupCleanupAuditIntentReceipt,
+) -> BackupCleanupAudit:
+    actions = tuple(
+        BackupCleanupAuditAction(
+            action.session,
+            (
+                BackupCleanupAuditStatus.FAILED
+                if index == failed_index
+                else BackupCleanupAuditStatus.NOT_RUN
+            ),
+            _before(action),
+            _entry_exists(backup_root / action.session),
+        )
+        for index, action in enumerate(inputs.actions)
+    )
+    return BackupCleanupAudit(
+        inputs.inventory_sha256,
+        inputs.plan_sha256,
+        inputs.approval_sha256,
+        actions,
+        intent_receipt,
+    )
+
+
+def _prevalidate_receipted_actions(
+    backup_root: Path,
+    inputs: _ExecutionInputs,
+) -> int | None:
+    for index, action in enumerate(inputs.actions):
+        try:
+            expected = inputs.inventory_sessions[_comparison_key(action.session)]
+            _validate_actual_session(backup_root, action, expected)
+            _capture_session_directory_identities(backup_root / action.session, expected.items)
+            _capture_session_file_identities(backup_root / action.session, expected.items)
+        except Exception:  # noqa: BLE001 - precondition result is sanitized in the Audit.
+            return index
+    return None
+
+
 def execute_backup_cleanup(
     package_root: Path,
     backup_root: Path,
@@ -526,27 +764,75 @@ def execute_backup_cleanup(
     inventory_path: Path,
     plan_path: Path,
     approval_path: Path,
+    report_path: Path | None = None,
+    intent_receipt_path: Path | None = None,
+    attempt_id: str | None = None,
 ) -> BackupCleanupAudit:
     """Execute only exactly approved sessions; no rollback is attempted."""
 
-    try:
-        validate_backup_root(package_root, backup_root)
-        package_resolved = package_root.resolve()
-        backup_resolved = backup_root.resolve(strict=False)
-        overlaps_repository = any(
-            backup_resolved == root or backup_resolved.is_relative_to(root)
-            for root in repository_roots(backup_root)
-        )
-        package_inside_backup = package_resolved.is_relative_to(backup_resolved)
-    except (BackupInventoryInputError, OSError) as exc:
-        raise BackupCleanupExecutionInputError("unsafe cleanup backup root") from exc
-    if overlaps_repository or package_inside_backup:
-        raise BackupCleanupExecutionInputError("unsafe cleanup backup root")
-    try:
-        backup_root_identity = _directory_identity(backup_root)
-    except _CleanupActionError as exc:
-        raise BackupCleanupExecutionInputError("unsafe cleanup backup root") from exc
+    _validate_receipted_mode(
+        package_root,
+        backup_root,
+        inventory_path=inventory_path,
+        plan_path=plan_path,
+        approval_path=approval_path,
+        report_path=report_path,
+        intent_receipt_path=intent_receipt_path,
+        attempt_id=attempt_id,
+    )
+    backup_root_identity = _validate_cleanup_roots(package_root, backup_root)
     inputs = _load_execution_inputs(inventory_path, plan_path, approval_path)
+    intent_receipt: BackupCleanupAuditIntentReceipt | None = None
+    receipt_content: bytes | None = None
+    if intent_receipt_path is not None:
+        assert attempt_id is not None
+        intent_receipt, receipt_content = _create_cleanup_operation_intent(
+            intent_receipt_path,
+            inputs=inputs,
+            attempt_id=attempt_id,
+        )
+        rebound_inputs = _load_execution_inputs(inventory_path, plan_path, approval_path)
+        if _input_binding_identity(rebound_inputs) != _input_binding_identity(inputs):
+            raise BackupCleanupExecutionInputError(
+                "cleanup inputs changed after Operation Intent Receipt"
+            )
+        assert report_path is not None
+        _verify_receipted_output_state(
+            intent_receipt_path,
+            receipt_content,
+            intent_receipt,
+            report_path,
+        )
+        inputs = rebound_inputs
+        try:
+            rebound_root_identity = _validate_cleanup_roots(package_root, backup_root)
+        except BackupCleanupExecutionInputError:
+            if inputs.actions:
+                return _failed_precondition_audit(
+                    inputs,
+                    failed_index=0,
+                    backup_root=backup_root,
+                    intent_receipt=intent_receipt,
+                )
+            raise
+        if rebound_root_identity != backup_root_identity:
+            if inputs.actions:
+                return _failed_precondition_audit(
+                    inputs,
+                    failed_index=0,
+                    backup_root=backup_root,
+                    intent_receipt=intent_receipt,
+                )
+            raise BackupCleanupExecutionInputError("cleanup backup root identity changed")
+        backup_root_identity = rebound_root_identity
+        failed_precondition = _prevalidate_receipted_actions(backup_root, inputs)
+        if failed_precondition is not None:
+            return _failed_precondition_audit(
+                inputs,
+                failed_index=failed_precondition,
+                backup_root=backup_root,
+                intent_receipt=intent_receipt,
+            )
     audit_actions: list[BackupCleanupAuditAction] = []
     failed = False
     for action in inputs.actions:
@@ -561,7 +847,22 @@ def execute_backup_cleanup(
                 )
             )
             continue
+        if intent_receipt_path is not None:
+            assert receipt_content is not None
+            assert intent_receipt is not None
+            assert report_path is not None
+            _verify_receipted_output_state(
+                intent_receipt_path,
+                receipt_content,
+                intent_receipt,
+                report_path,
+            )
         try:
+            if (
+                intent_receipt is not None
+                and _validate_cleanup_roots(package_root, backup_root) != backup_root_identity
+            ):
+                raise _CleanupActionError("cleanup root identity changed")
             expected = inputs.inventory_sessions[_comparison_key(action.session)]
             directory_identities = _capture_session_directory_identities(
                 session_path, expected.items
@@ -606,6 +907,7 @@ def execute_backup_cleanup(
         inputs.plan_sha256,
         inputs.approval_sha256,
         tuple(audit_actions),
+        intent_receipt,
     )
 
 
@@ -622,6 +924,25 @@ def parse_backup_cleanup_audit_bytes(content: bytes) -> BackupCleanupAudit:
     summary = payload.get("summary")
     raw_actions = payload.get("actions")
     schema_version = payload.get("schema_version")
+    intent_receipt: BackupCleanupAuditIntentReceipt | None = None
+    if "intent_receipt" in payload:
+        value = payload["intent_receipt"]
+        if not isinstance(value, dict):
+            raise ValueError("invalid Cleanup Audit Intent Receipt binding")
+        intent_schema_version = value.get("schema_version")
+        intent_sha256 = value.get("sha256")
+        if not (
+            isinstance(intent_schema_version, int)
+            and not isinstance(intent_schema_version, bool)
+            and intent_schema_version == OPERATION_INTENT_SCHEMA_VERSION
+            and _is_sha256(intent_sha256)
+        ):
+            raise ValueError("invalid Cleanup Audit Intent Receipt binding")
+        intent_receipt = BackupCleanupAuditIntentReceipt(
+            intent_schema_version,
+            validate_operation_intent_attempt_id(value.get("attempt_id")),
+            intent_sha256,
+        )
     if not (
         payload.get("report_type") == "knowledge-importer-backup-cleanup-audit"
         and schema_version == 1
@@ -673,6 +994,7 @@ def parse_backup_cleanup_audit_bytes(content: bytes) -> BackupCleanupAudit:
         bindings["plan_sha256"],
         bindings["approval_sha256"],
         tuple(actions),
+        intent_receipt,
     )
     expected_summary = parsed.payload()["summary"]
     if (
@@ -682,6 +1004,59 @@ def parse_backup_cleanup_audit_bytes(content: bytes) -> BackupCleanupAudit:
     ):
         raise ValueError("invalid Backup Cleanup Audit summary or order")
     return parsed
+
+
+def backup_cleanup_audit_bytes(audit: BackupCleanupAudit) -> bytes:
+    """Serialize one deterministic Cleanup Audit using its v1 field order."""
+
+    content = (json.dumps(audit.payload(), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    parse_backup_cleanup_audit_bytes(content)
+    return content
+
+
+def verify_backup_cleanup_intent(
+    receipt_content: bytes,
+    audit_content: bytes,
+    *,
+    inventory_content: bytes,
+    plan_content: bytes,
+    approval_content: bytes,
+) -> None:
+    """Verify exact Receipt/Audit/input/action binding for one cleanup attempt."""
+
+    receipt = parse_operation_intent_bytes(receipt_content)
+    audit = parse_backup_cleanup_audit_bytes(audit_content)
+    inputs = _parse_execution_inputs(inventory_content, plan_content, approval_content)
+    receipt_sha256 = operation_intent_sha256(receipt_content)
+    binding = audit.intent_receipt
+    audit_actions = tuple(
+        OperationIntentAction(
+            index,
+            "delete-backup-session",
+            action.session,
+            "explicit-retention-release",
+        )
+        for index, action in enumerate(audit.actions)
+    )
+    if not (
+        binding is not None
+        and binding.schema_version == OPERATION_INTENT_SCHEMA_VERSION
+        and binding.attempt_id == receipt.attempt_id
+        and binding.sha256 == receipt_sha256
+        and receipt.operation_type == BACKUP_CLEANUP
+        and receipt.bindings == _cleanup_intent_bindings(inputs)
+        and receipt.actions == _cleanup_intent_actions(inputs.actions)
+        and audit_actions == receipt.actions
+        and audit.inventory_sha256 == inputs.inventory_sha256
+        and audit.plan_sha256 == inputs.plan_sha256
+        and audit.approval_sha256 == inputs.approval_sha256
+        and len(audit.actions) == len(inputs.actions)
+        and all(
+            audit_action.before == _before(input_action)
+            for audit_action, input_action in zip(audit.actions, inputs.actions, strict=True)
+        )
+    ):
+        raise ValueError("Backup Cleanup Intent binding mismatch")
 
 
 def is_backup_cleanup_audit_report(path: Path) -> bool:
@@ -730,7 +1105,7 @@ def write_backup_cleanup_audit(
     path.parent.mkdir(parents=True, exist_ok=True)
     if path_uses_link_or_reparse(path.parent) or not path.parent.is_dir():
         raise OSError("unsafe Cleanup Audit output parent")
-    content = (json.dumps(audit.payload(), ensure_ascii=False, indent=2) + "\n").encode()
+    content = backup_cleanup_audit_bytes(audit)
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(

@@ -593,7 +593,7 @@ Plan／Approval生成の成功はblockedまたは0 actionを含めて`0`、CLI i
 
 ## Backup Cleanup Audit schema version 1
 
-`knowledge-importer backup-cleanup-execute BACKUP_ROOT --package-root PACKAGE_ROOT --inventory INVENTORY_JSON --plan PLAN_JSON --approval APPROVAL_JSON --report-json AUDIT_JSON`は、明示承認済みのeligible sessionだけを不可逆に削除します。session selectorは追加で受け取らず、Approvalの`all-planned` scopeを唯一の実行対象とします。
+`knowledge-importer backup-cleanup-execute BACKUP_ROOT --package-root PACKAGE_ROOT --inventory INVENTORY_JSON --plan PLAN_JSON --approval APPROVAL_JSON --report-json AUDIT_JSON [--intent-receipt PATH --attempt-id ID]`は、明示承認済みのeligible sessionだけを不可逆に削除します。session selectorは追加で受け取らず、Approvalの`all-planned` scopeを唯一の実行対象とします。Receiptを指定しない場合は既存legacy mode、指定した場合だけreceipted modeです。`--attempt-id`の単独指定と、`--attempt-id`なしのReceipt指定を終了コード`2`で拒否します。
 
 `--package-root`は実行時の必須preconditionです。Inventory作成時と同じroot validationを再実行し、package rootとbackup rootの同一・双方向の包含、backup rootの検出可能なGit repository内配置、存在しない／unsafe directory、全path componentのsymlink・junction／reparse pointを拒否します。package rootはAuditへ記録せず、その配下のMarkdown、Manifest、Metadata Sidecar、source PDF、その他fileを変更しません。
 
@@ -622,11 +622,16 @@ root safety確認後にInventory、Plan、Approvalを元file実bytesから再読
       },
       "after": {"exists": false}
     }
-  ]
+  ],
+  "intent_receipt": {
+    "schema_version": 1,
+    "attempt_id": "cleanup-attempt-001",
+    "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  }
 }
 ```
 
-Auditのaction順はApproval順と同じcanonical順です。statusは`deleted`、`failed`、`not-run`だけで、absolute path、username、hostname、cwd、command line、timestamp、tracebackを含めません。Auditはbackup root、package root、入力fileの外にある新規pathへだけ作成するimmutable execution recordです。既存のvalid Audit、foreign regular file、directory、symlink、junction／reparse point、読取り不能entryはcleanup開始前に拒否し、対象sessionを変更しません。再実行時は別のreport pathを指定します。
+Auditのaction順はApproval順と同じcanonical順です。statusは`deleted`、`failed`、`not-run`だけで、absolute path、username、hostname、cwd、command line、timestamp、tracebackを含めません。`intent_receipt`はreceipted modeだけに存在し、Receipt exact bytes SHA-256と同じ`attempt_id`へbindingします。legacy Auditのfield setとbytes behaviorは維持します。Auditはbackup root、package root、入力fileの外にある新規pathへだけ作成するimmutable execution recordです。既存のvalid Audit、foreign regular file、directory、symlink、junction／reparse point、読取り不能entryはcleanup開始前に拒否し、対象sessionを変更しません。再実行時は別のreport pathを指定します。
 
 書込みは同一directoryのtemporary fileをflush／fsyncした後、`os.link(..., follow_symlinks=False)`でcreate-only／no-clobber commitします。`Path.replace()`による既存finalの更新は行いません。cleanup後に別processがfinal pathを作成した場合、そのfileを保持してexit code `2`とし、削除済みsessionは復元しません。全action削除成功（0 actionを含む）は`0`、precondition／TOCTOU／部分削除／filesystem deletion失敗は`1`、CLI・schema・binding・report保護／書込み失敗は`2`です。自動retention、automatic cleanup、age／size／generation選択は実装しません。
 
@@ -704,7 +709,7 @@ stdoutは`sources_expected / sources_provided / matched / missing / unexpected /
 
 ## Operation Intent Receipt schema version 1
 
-Operation Intent Receipt v1は、Repair ExecutionとBackup Cleanup Executionがmutation開始前に確定済みscopeを記録するための共通contractです。Repair Executionはopt-in receipted modeで接続済み、Backup Cleanupは未接続です。Receiptは`execution intent evidence`だけを表し、execution proof、success proof、mutation proof、retry safety proofではありません。Receipt単体から実行済み、成功、失敗、package変更を推測してはなりません。
+Operation Intent Receipt v1は、Repair ExecutionとBackup Cleanup Executionがmutation開始前に確定済みscopeを記録するための共通contractです。両Executionへopt-in receipted modeで接続済みです。Receiptは`execution intent evidence`だけを表し、execution proof、success proof、mutation proof、retry safety proofではありません。Receipt単体から実行済み、成功、失敗、package変更を推測してはなりません。
 
 ```json
 {
@@ -760,4 +765,6 @@ Parserはrequired field、exact type、既知operation／artifact／action、sch
 
 writerは必要な親directoryを作成後、全path componentのlink／reparse safetyを再検証し、同一directoryのtemporary fileへ書き込んでflush／fsyncします。final commitは`os.link(..., follow_symlinks=False)`によるcreate-only／no-clobberであり、`Path.replace()`で既存entryを上書きしません。並行writerがfinal pathを先に作成した場合はそのentryを保持し、temporary fileだけをbest-effortで削除します。
 
-Repair Execution integrationではoperatorがReceipt actionを自由指定するCLIを追加せず、既存execution scopeからのみ生成します。final Repair Execution Reportのoptional fieldはReceipt exact bytes SHA-256へbindingし、legacy Reportには追加されません。Backup Cleanup Execution integration、Receipt pairing、orphan／stale／conflict scanner、Operational Audit integration、自動retention、Receipt cleanupは実装しません。Backup Cleanup Audit、Operational Auditその他schemaは変更しません。
+Repair ExecutionとBackup Cleanup ExecutionではoperatorがReceipt actionを自由指定するCLIを追加せず、既存の正式検証済みscopeからのみ生成します。Backup CleanupはInventory、Plan、Approvalをstable readし、exact-byte bindingと全approved actionを検証してからReceiptをcreate-only生成します。その後、3入力、package／backup root境界、session manifest、tree、全backup file digest、Receipt／Audit pathを不可逆削除前に再検証します。
+
+final Repair Execution Report／Cleanup Auditのoptional fieldはReceipt exact bytes SHA-256へbindingし、各formal verifierがReceipt、final outcome、exact lifecycle input、action順を照合します。legacy Report／Auditにはfieldを追加しません。Receipt write失敗とReceipt後の入力変更は終了コード`2`でmutation 0件、root／session precondition変更は終了コード`1`で削除0件です。session途中failureは既存fail-fast／partial deletion semanticsを維持します。Audit write／post-write verification失敗は終了コード`2`で、Receiptを保持し削除済みsessionをrollbackしません。retryでは新しいReceipt path、`attempt_id`、final Report／Audit pathが必要です。Receipt pairing、orphan／stale／conflict scanner、Operational Audit integration、自動retention、Receipt cleanupは実装しません。
