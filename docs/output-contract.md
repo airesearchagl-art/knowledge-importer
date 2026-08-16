@@ -767,4 +767,40 @@ writerは必要な親directoryを作成後、全path componentのlink／reparse 
 
 Repair ExecutionとBackup Cleanup ExecutionではoperatorがReceipt actionを自由指定するCLIを追加せず、既存の正式検証済みscopeからのみ生成します。Backup CleanupはInventory、Plan、Approvalをstable readし、exact-byte bindingと全approved actionを検証してからReceiptをcreate-only生成します。その後、Receipt／Audit path、3入力のstable read・schema／semantic・exact-byte SHA-256・approved action scope、package／backup root境界、session manifest、tree、全backup file digestの順で、各不可逆action直前に再検証します。
 
-final Repair Execution Report／Cleanup Auditのoptional fieldはReceipt exact bytes SHA-256へbindingし、各formal verifierがReceipt、final outcome、exact lifecycle input、action順を照合します。legacy Report／Auditにはfieldを追加しません。Receipt write失敗と最初のaction前のlifecycle入力変更は終了コード`2`でmutation 0件、root／session precondition変更は終了コード`1`で削除0件です。複数sessionの途中でlifecycle入力変更を検出した場合は終了コード`2`で当該・後続actionを実行せず、Receiptと変更されたsourceを保持し、既削除sessionはrollbackしません。変更後sourceへexact bindingできないためfinal Auditは生成しません。session自体の途中failureは既存fail-fast／partial deletion semanticsを維持します。Audit write／post-write verification失敗は終了コード`2`で、Receiptを保持し削除済みsessionをrollbackしません。retryでは新しいReceipt path、`attempt_id`、final Report／Audit pathが必要です。Receipt pairing、orphan／stale／conflict scanner、Operational Audit integration、自動retention、Receipt cleanupは実装しません。
+final Repair Execution Report／Cleanup Auditのoptional fieldはReceipt exact bytes SHA-256へbindingし、各formal verifierがReceipt、final outcome、exact lifecycle input、action順を照合します。legacy Report／Auditにはfieldを追加しません。Receipt write失敗と最初のaction前のlifecycle入力変更は終了コード`2`でmutation 0件、root／session precondition変更は終了コード`1`で削除0件です。複数sessionの途中でlifecycle入力変更を検出した場合は終了コード`2`で当該・後続actionを実行せず、Receiptと変更されたsourceを保持し、既削除sessionはrollbackしません。変更後sourceへexact bindingできないためfinal Auditは生成しません。session自体の途中failureは既存fail-fast／partial deletion semanticsを維持します。Audit write／post-write verification失敗は終了コード`2`で、Receiptを保持し削除済みsessionをrollbackしません。retryでは新しいReceipt path、`attempt_id`、final Report／Audit pathが必要です。stale判定、directory inventory、Operational Audit integration、自動retention、Receipt cleanupは実装しません。
+
+## Operation Intent Status schema version 1
+
+`knowledge-importer intent-status --intent-receipt PATH [--repair-execution PATH ...] [--backup-cleanup-audit PATH ...]`は、1件のvalid Receiptと0件以上の明示指定されたfinal report候補をread-onlyでpairingします。Receiptとfinal reportのexact bytesをstable readし、Receipt identityには`SHA-256(exact Receipt bytes)`だけを使います。filename、path、mtime、parse後payloadの再serialize hash、`attempt_id`単独ではbindingしません。
+
+```json
+{
+  "report_type": "knowledge-importer-operation-intent-status",
+  "schema_version": 1,
+  "receipt": {
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "operation_type": "repair-execution",
+    "attempt_id": "repair-attempt-001"
+  },
+  "classification": "paired",
+  "final_reports": [
+    {
+      "source_type": "repair-execution",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "bindings": {
+    "receipt_final_report": "verified",
+    "lifecycle_inputs": "not-provided",
+    "current_preconditions": "not-provided"
+  },
+  "operator_action_required": false,
+  "reason": "paired"
+}
+```
+
+分類は`paired / orphan / conflicting`です。候補0件は`orphan / final-report-missing`です。異なる候補が複数なら内容の優先順位を推測せず`conflicting / multiple-final-reports`です。単一候補はReceipt SHA-256、`attempt_id`、`operation_type`、canonical action scope、final reportが保持するlifecycle digestを順に照合します。不一致reasonは`receipt-sha256-mismatch / attempt-id-mismatch / operation-type-mismatch / action-scope-mismatch / binding-scope-mismatch`、Receipt fieldを持たない従来reportは`legacy-final-report`です。Repair final reportにはArtifact Manifest digestがないため、Plan／Approval／Preflightだけを比較し、Manifest bindingをverifiedとは表現しません。
+
+`paired`だけが終了コード`0`です。validな`orphan / conflicting`はstatus JSONを出力して終了コード`1`、CLI／I/O／schema／semantic不正、同一final bytesの重複はstatusを生成せず終了コード`2`です。同一final bytesはpathやsource optionが異なってもduplicateです。`final_reports`は`(source_type, sha256)`順でcanonical化し、CLI指定順に依存しません。unknown v1 fieldは無視し、future schemaは拒否します。
+
+出力はUTF-8、2-space indent、trailing newlineで決定的です。source path、absolute path、username、hostname、timestamp、cwd、command line、traceback、Unicode category Cfを含めません。`orphan / conflicting`はoperator確認が必要ですが、mutation、success、failure、retry safetyを推測しません。`lifecycle_inputs`と`current_preconditions`はPR1では常に`not-provided`です。Receipt、final report、package、backup、Operational Auditを変更せず、destructive action、stale検証、directory走査、自動retry、自動cleanupは行いません。暗号署名やartifactの真正性も証明しません。

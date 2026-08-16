@@ -42,6 +42,7 @@ EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/cli.py",
     "knowledge_importer/converter.py",
     "knowledge_importer/document_metadata.py",
+    "knowledge_importer/intent_status.py",
     "knowledge_importer/json_writer.py",
     "knowledge_importer/logging_config.py",
     "knowledge_importer/main.py",
@@ -178,6 +179,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     backup_cleanup_execute_help = _run_command([str(cli), "backup-cleanup-execute", "--help"])
     audit_help = _run_command([str(cli), "audit", "--help"])
     audit_verify_help = _run_command([str(cli), "audit-verify", "--help"])
+    intent_status_help = _run_command([str(cli), "intent-status", "--help"])
     module_help = _run_command([str(python), "-m", "knowledge_importer", "--help"])
     for option in EXPECTED_OPTIONS:
         assert option in cli_help
@@ -193,6 +195,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "backup-cleanup-execute" in module_help
     assert "audit" in module_help
     assert "audit-verify" in module_help
+    assert "intent-status" in module_help
     for option in ("--manifest", "--report-json", "--strict"):
         assert option in validate_help
         assert option in repair_plan_help
@@ -228,6 +231,12 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "OPERATIONAL_AUDIT_JSON" in audit_verify_help
     for option in ("--repair-execution", "--backup-cleanup-audit"):
         assert option in audit_verify_help
+    for option in (
+        "--intent-receipt",
+        "--repair-execution",
+        "--backup-cleanup-audit",
+    ):
+        assert option in intent_status_help
     metadata = _run_command(
         [
             str(python),
@@ -239,6 +248,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
                 "knowledge_importer.backup_cleanup_execution, "
                 "knowledge_importer.backup_cleanup_plan, "
                 "knowledge_importer.backup_inventory, "
+                "knowledge_importer.intent_status, "
                 "knowledge_importer.json_writer, "
                 "knowledge_importer.markdown_quality, knowledge_importer.package_validation, "
                 "knowledge_importer.operation_intent, "
@@ -267,6 +277,7 @@ def test_readme_documents_every_public_batch_option() -> None:
     assert "backup-inventory" in readme
     assert "knowledge-importer audit" in readme
     assert "knowledge-importer audit-verify" in readme
+    assert "knowledge-importer intent-status" in readme
     assert "Operation Intent Receipt v1" in readme
     assert version("knowledge-importer") == "0.1.0"
 
