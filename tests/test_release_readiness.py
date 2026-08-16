@@ -240,6 +240,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
         "--plan",
         "--approval",
         "--preflight",
+        "--package-root",
     ):
         assert option in intent_status_help
     metadata = _run_command(

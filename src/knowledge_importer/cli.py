@@ -657,6 +657,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Repair lifecycleのPreflight v1",
     )
+    intent_status_parser.add_argument(
+        "--package-root",
+        type=Path,
+        metavar="PATH",
+        help="Repair orphan Receiptのcurrent package preconditionをread-only検証",
+    )
     return parser
 
 
@@ -1282,6 +1288,7 @@ def _run_intent_status(
     plan_path: Path | None,
     approval_path: Path | None,
     preflight_path: Path | None,
+    package_root: Path | None,
 ) -> int:
     try:
         status = inspect_operation_intent_status(
@@ -1293,6 +1300,7 @@ def _run_intent_status(
             plan_path=plan_path,
             approval_path=approval_path,
             preflight_path=preflight_path,
+            package_root=package_root,
         )
         content = operation_intent_status_bytes(status)
     except (IntentStatusInputError, ValueError) as exc:
@@ -1400,6 +1408,7 @@ def run(
             plan_path=args.plan,
             approval_path=args.approval,
             preflight_path=args.preflight,
+            package_root=args.package_root,
         )
     if (
         args.normalize_markdown is not None

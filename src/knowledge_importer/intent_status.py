@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from knowledge_importer.backup_cleanup_execution import (
@@ -31,6 +31,10 @@ from knowledge_importer.operational_audit import (
 from knowledge_importer.repair_execution import (
     parse_repair_execution_report_bytes,
     verify_repair_operation_intent_lifecycle,
+)
+from knowledge_importer.repair_preflight import (
+    parse_repair_preflight_bytes,
+    repair_preflight_current_state_matches,
 )
 
 INTENT_STATUS_REPORT_TYPE = "knowledge-importer-operation-intent-status"
@@ -316,12 +320,23 @@ def inspect_operation_intent_status(
     plan_path: Path | None = None,
     approval_path: Path | None = None,
     preflight_path: Path | None = None,
+    package_root: Path | None = None,
 ) -> OperationIntentStatus:
     """Stable-read source artifacts and return a read-only pairing snapshot."""
 
     try:
         receipt_content = read_input_bytes(receipt_path)
         receipt = parse_operation_intent_bytes(receipt_content)
+        if package_root is not None and (
+            receipt.operation_type != REPAIR_EXECUTION
+            or inventory_path is not None
+            or any(
+                path is None for path in (manifest_path, plan_path, approval_path, preflight_path)
+            )
+        ):
+            raise IntentStatusInputError(
+                "Repair package root requires complete Repair lifecycle inputs"
+            )
         lifecycle_paths = (
             manifest_path,
             inventory_path,
@@ -368,15 +383,58 @@ def inspect_operation_intent_status(
                     plan_path=plan_path,
                     approval_path=approval_path,
                 )
-        return build_operation_intent_status(
+        repair_execution_contents = tuple(read_input_bytes(path) for path in repair_execution_paths)
+        backup_cleanup_audit_contents = tuple(
+            read_input_bytes(path) for path in backup_cleanup_audit_paths
+        )
+        status = build_operation_intent_status(
             receipt_content,
-            repair_execution_contents=tuple(
-                read_input_bytes(path) for path in repair_execution_paths
-            ),
-            backup_cleanup_audit_contents=tuple(
-                read_input_bytes(path) for path in backup_cleanup_audit_paths
-            ),
+            repair_execution_contents=repair_execution_contents,
+            backup_cleanup_audit_contents=backup_cleanup_audit_contents,
             lifecycle_verification=lifecycle_verification,
+        )
+        if package_root is None:
+            return status
+        if status.classification != ORPHAN or status.lifecycle_inputs != VERIFIED:
+            return replace(status, current_preconditions=NOT_APPLICABLE)
+
+        assert manifest_path is not None
+        assert plan_path is not None
+        assert approval_path is not None
+        assert preflight_path is not None
+        rebound = verify_repair_operation_intent_lifecycle(
+            receipt_content,
+            manifest_path=manifest_path,
+            plan_path=plan_path,
+            approval_path=approval_path,
+            preflight_path=preflight_path,
+        )
+        if not rebound.bindings_match or rebound.action_scope_matches is not True:
+            raise IntentStatusInputError(
+                "Repair lifecycle inputs changed before current precondition verification"
+            )
+        expected_preflight = parse_repair_preflight_bytes(read_input_bytes(preflight_path))
+        matches = repair_preflight_current_state_matches(
+            package_root,
+            manifest_path=manifest_path,
+            plan_path=plan_path,
+            approval_path=approval_path,
+            expected=expected_preflight,
+        )
+        rebound = verify_repair_operation_intent_lifecycle(
+            receipt_content,
+            manifest_path=manifest_path,
+            plan_path=plan_path,
+            approval_path=approval_path,
+            preflight_path=preflight_path,
+        )
+        if not rebound.bindings_match or rebound.action_scope_matches is not True:
+            raise IntentStatusInputError(
+                "Repair lifecycle inputs changed during current precondition verification"
+            )
+        return replace(
+            status,
+            current_preconditions=VERIFIED if matches else MISMATCH,
         )
     except (OSError, TypeError, ValueError) as exc:
         if isinstance(exc, IntentStatusInputError):
@@ -490,13 +548,19 @@ def parse_operation_intent_status_bytes(content: bytes) -> OperationIntentStatus
         and receipt_final_report == MISSING
         and reason == FINAL_REPORT_MISSING
         and lifecycle_inputs in {NOT_PROVIDED, VERIFIED}
-        and current_preconditions == NOT_PROVIDED
+        and current_preconditions in {NOT_PROVIDED, VERIFIED, MISMATCH}
+        and (
+            current_preconditions == NOT_PROVIDED
+            or lifecycle_inputs == VERIFIED
+            and receipt.operation_type == REPAIR_EXECUTION
+        )
         and operator_action_required
         or classification == STALE
         and not final_reports
         and receipt_final_report == MISSING
         and lifecycle_inputs == MISMATCH
-        and current_preconditions == NOT_PROVIDED
+        and current_preconditions in {NOT_PROVIDED, NOT_APPLICABLE}
+        and (current_preconditions == NOT_PROVIDED or receipt.operation_type == REPAIR_EXECUTION)
         and lifecycle_reason
         and operator_action_required
         or classification == CONFLICTING
@@ -504,7 +568,8 @@ def parse_operation_intent_status_bytes(content: bytes) -> OperationIntentStatus
         and receipt_final_report == CONFLICTING
         and reason in _CONFLICT_REASONS
         and lifecycle_inputs in {NOT_PROVIDED, VERIFIED, MISMATCH}
-        and current_preconditions == NOT_PROVIDED
+        and current_preconditions in {NOT_PROVIDED, NOT_APPLICABLE}
+        and (current_preconditions == NOT_PROVIDED or receipt.operation_type == REPAIR_EXECUTION)
         and (len(final_reports) > 1) == (reason == MULTIPLE_FINAL_REPORTS)
         and (len(final_reports) > 1 or (reason == OPERATION_TYPE_MISMATCH) != source_type_matches)
         and operator_action_required

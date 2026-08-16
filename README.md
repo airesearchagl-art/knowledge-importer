@@ -358,10 +358,13 @@ uv run knowledge-importer intent-status `
   --manifest .\package\manifest.json `
   --plan .\reports\repair-plan.json `
   --approval .\reports\repair-approval.json `
-  --preflight .\reports\repair-preflight.json
+  --preflight .\reports\repair-preflight.json `
+  --package-root .\package
 ```
 
-Cleanup Receiptでは`--inventory`、`--plan`、`--approval`を同時指定します。Repairは4入力、Cleanupは3入力のall-or-noneで、部分指定やoperation typeに合わない入力は終了コード`2`です。lifecycle入力はstable readした実bytesのSHA-256とcanonical action scopeをReceiptへ照合し、parse後payloadの再serialize hash、filename、path、mtimeはidentityに使いません。filesystem上のcurrent preconditionはこの機能では検査しません。
+Cleanup Receiptでは`--inventory`、`--plan`、`--approval`を同時指定します。Repairは4入力、Cleanupは3入力のall-or-noneで、部分指定やoperation typeに合わない入力は終了コード`2`です。lifecycle入力はstable readした実bytesのSHA-256とcanonical action scopeをReceiptへ照合し、parse後payloadの再serialize hash、filename、path、mtimeはidentityに使いません。
+
+Repair Receiptでは`--package-root`を指定すると、final reportがない`orphan`かつlifecycle入力が完全一致する場合だけ、Receipt-bound Preflightと現在のpackageをread-onlyで比較します。一致時は`current_preconditions=verified`、targetの出現・消失、Markdown／sidecar digest変更、unsafe target・root escape時は`mismatch`です。package root自体が不存在、symlink、junction、reparse pointの場合はStatusを生成せず終了コード`2`です。`--package-root`にはRepair lifecycle 4入力が必須で、Cleanup Receiptには使用できません。paired／conflicting／staleではfilesystemを検査せず`not-applicable`とします。Cleanup current precondition検証は未実装です。
 
 Receipt exact bytesのSHA-256をidentityとし、`attempt_id`だけではpairingしません。Receipt SHA-256、`attempt_id`、`operation_type`、action scope、final reportが保持するlifecycle digestを比較し、結果をstdoutへ決定的なJSONで出力します。Repair final reportにはArtifact Manifest digestがないため、final reportだけではそのdigestを再検証済みとは扱いません。
 
@@ -371,7 +374,7 @@ Receipt exact bytesのSHA-256をidentityとし、`attempt_id`だけではpairing
 - `conflicting`: 候補が複数、legacy report、またはReceipt／scope／bindingが不一致。終了コード`1`
 - CLI、I/O、Receipt／final report schema、同一final bytesの重複が不正。status JSONを出さず終了コード`2`
 
-`stale`はorphanだけから派生し、pairedやconflictingを再分類しません。pairedで現在のlifecycle入力が不一致なら`classification=paired`、`lifecycle_inputs=mismatch`、`operator_action_required=true`としてpairingとfreshnessを分離します。`orphan / stale / conflicting`はoperator確認が必要ですが、Receiptやstale状態だけからmutation実施、成功、失敗、retry可否を推測しません。source path、absolute path、username、hostname、timestamp、cwd、command line、tracebackは出力せず、入力artifactやpackage、backupを変更しません。v1は明示入力された単一attemptだけを扱い、filesystem current precondition、directory走査、自動retry、自動cleanup、Operational Auditへの統合は行いません。暗号署名やartifactの真正性も証明しません。
+`stale`はorphanだけから派生し、pairedやconflictingを再分類しません。pairedで現在のlifecycle入力が不一致なら`classification=paired`、`lifecycle_inputs=mismatch`、`operator_action_required=true`としてpairingとfreshnessを分離します。`orphan / stale / conflicting`はoperator確認が必要です。`current_preconditions=verified`はretry-safe、未実行、元PDF provenanceの証明ではなく、`mismatch`も実行済みや失敗を意味しません。Statusはread-onlyな現在snapshotであり、取得後のTOCTOU安全性、digest一致による真正性、同じbytesへ復元された変更履歴を保証しません。source path、absolute path、username、hostname、timestamp、cwd、command line、tracebackは出力せず、入力artifactやpackage、backupを変更しません。v1は明示入力された単一attemptだけを扱い、元PDF実体、Cleanup current precondition、directory走査、自動retry、自動cleanup、Operational Auditへの統合は扱いません。
 
 ### Recursive conversion / include・exclude filters
 

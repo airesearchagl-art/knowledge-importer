@@ -8,7 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from knowledge_importer.artifact_manifest import ArtifactManifest, ArtifactManifestSettings
+import knowledge_importer.intent_status as intent_status_module
+from knowledge_importer.artifact_manifest import (
+    ArtifactDigest,
+    ArtifactManifest,
+    ArtifactManifestItem,
+    ArtifactManifestSettings,
+    ManifestStatus,
+    digest_file,
+    write_artifact_manifest,
+)
 from knowledge_importer.backup_cleanup_approval import BackupCleanupApproval
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAudit,
@@ -20,6 +29,11 @@ from knowledge_importer.backup_cleanup_execution import (
 )
 from knowledge_importer.backup_cleanup_plan import BackupCleanupPlan
 from knowledge_importer.backup_inventory import BackupInventory
+from knowledge_importer.document_metadata import (
+    DocumentMetadataSettings,
+    build_document_metadata,
+    write_document_metadata,
+)
 from knowledge_importer.intent_status import (
     ACTION_SCOPE_MISMATCH,
     ATTEMPT_ID_MISMATCH,
@@ -52,15 +66,31 @@ from knowledge_importer.operation_intent import (
     operation_intent_sha256,
     parse_operation_intent_bytes,
 )
-from knowledge_importer.repair_approval import RepairApproval
+from knowledge_importer.package_validation import validate_package
+from knowledge_importer.repair_approval import (
+    RepairApproval,
+    build_repair_approval,
+    write_repair_approval,
+)
 from knowledge_importer.repair_execution import (
     ExecutionActionResult,
     RepairExecutionIntentReceipt,
     RepairExecutionReport,
     repair_execution_report_bytes,
 )
-from knowledge_importer.repair_plan import RepairAction, RepairActionCategory, RepairPlan
-from knowledge_importer.repair_preflight import PreflightTarget, RepairPreflight
+from knowledge_importer.repair_plan import (
+    RepairAction,
+    RepairActionCategory,
+    RepairPlan,
+    build_repair_plan,
+    write_repair_plan,
+)
+from knowledge_importer.repair_preflight import (
+    PreflightTarget,
+    RepairPreflight,
+    build_repair_preflight,
+    write_repair_preflight,
+)
 
 
 def _payload_bytes(payload: dict[str, object]) -> bytes:
@@ -143,6 +173,92 @@ def _write_cleanup_lifecycle(tmp_path: Path) -> tuple[bytes, dict[str, Path]]:
         )
     )
     return receipt, paths
+
+
+def _write_repair_current_lifecycle(
+    tmp_path: Path,
+    *,
+    stale_sidecar: bool = False,
+) -> tuple[bytes, dict[str, Path], Path, Path, Path]:
+    package_root = tmp_path / "package"
+    markdown = package_root / "section" / "item.md"
+    markdown.parent.mkdir(parents=True, exist_ok=True)
+    markdown.write_text("# 架空文書\n\nCurrent precondition検証用の本文です。\n", encoding="utf-8")
+    source = b"%PDF-1.4\n% synthetic intent status fixture\n"
+    succeeded = ArtifactManifestItem(
+        "section/item.pdf",
+        "section/item.md",
+        ManifestStatus.SUCCEEDED,
+        ArtifactDigest(len(source), hashlib.sha256(source).hexdigest()),
+        digest_file(markdown),
+    )
+    target = package_root / "section" / "item.metadata.json"
+    item = succeeded
+    if stale_sidecar:
+        write_document_metadata(
+            target,
+            build_document_metadata(
+                succeeded,
+                DocumentMetadataSettings(False, None, False),
+            ),
+        )
+        item = ArtifactManifestItem(
+            succeeded.input_path,
+            succeeded.output_path,
+            ManifestStatus.FAILED,
+            succeeded.input_digest,
+            ArtifactDigest(None, None),
+        )
+
+    manifest = tmp_path / "manifest.json"
+    plan = tmp_path / "plan.json"
+    approval = tmp_path / "approval.json"
+    preflight = tmp_path / "preflight.json"
+    write_artifact_manifest(
+        manifest,
+        ArtifactManifest(ArtifactManifestSettings(), (item,)),
+    )
+    repair_plan = build_repair_plan(
+        validate_package(package_root, manifest_path=manifest),
+        manifest_name=manifest.name,
+    )
+    write_repair_plan(plan, repair_plan)
+    write_repair_approval(approval, build_repair_approval(plan))
+    expected_preflight = build_repair_preflight(
+        package_root,
+        manifest_path=manifest,
+        plan_path=plan,
+        approval_path=approval,
+    )
+    write_repair_preflight(preflight, expected_preflight)
+    lifecycle = {
+        "manifest_path": manifest,
+        "plan_path": plan,
+        "approval_path": approval,
+        "preflight_path": preflight,
+    }
+    receipt = operation_intent_bytes(
+        OperationIntentReceipt(
+            "repair-current-001",
+            REPAIR_EXECUTION,
+            (
+                OperationIntentBinding("artifact-manifest", 1, _sha256(manifest.read_bytes())),
+                OperationIntentBinding("repair-plan", 1, _sha256(plan.read_bytes())),
+                OperationIntentBinding("repair-approval", 1, _sha256(approval.read_bytes())),
+                OperationIntentBinding("repair-preflight", 1, _sha256(preflight.read_bytes())),
+            ),
+            tuple(
+                OperationIntentAction(
+                    index,
+                    action.repair_action.action.value,
+                    action.repair_action.path,
+                    action.repair_action.reason_category,
+                )
+                for index, action in enumerate(expected_preflight.actions)
+            ),
+        )
+    )
+    return receipt, lifecycle, package_root, markdown, target
 
 
 def _repair_receipt(*, attempt_id: str = "repair-attempt-001") -> bytes:
@@ -561,6 +677,200 @@ def test_repair_orphan_with_complete_lifecycle_inputs_is_verified(tmp_path: Path
     assert {path: path.read_bytes() for path in before} == before
 
 
+def test_repair_orphan_current_package_preconditions_are_verified_read_only(
+    tmp_path: Path,
+) -> None:
+    receipt_content, lifecycle, package_root, markdown, _ = _write_repair_current_lifecycle(
+        tmp_path
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    sources = (receipt, markdown, *lifecycle.values())
+    before = {path: path.read_bytes() for path in sources}
+
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        **lifecycle,
+    )
+    first = operation_intent_status_bytes(status)
+    second = operation_intent_status_bytes(status)
+
+    assert status.classification == ORPHAN
+    assert status.reason == FINAL_REPORT_MISSING
+    assert status.lifecycle_inputs == "verified"
+    assert status.current_preconditions == "verified"
+    assert status.operator_action_required
+    assert status.exit_code == 1
+    assert first == second
+    assert parse_operation_intent_status_bytes(first) == status
+    assert {path: path.read_bytes() for path in sources} == before
+    output = first.decode("utf-8")
+    assert str(tmp_path) not in output
+    assert "C:\\Users\\" not in output
+    assert "Traceback" not in output
+    assert "timestamp" not in output
+    assert not any(unicodedata.category(character) == "Cf" for character in output)
+
+
+@pytest.mark.parametrize("change", ["target-created", "markdown-changed", "markdown-removed"])
+def test_regenerate_sidecar_current_package_changes_are_mismatch(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    receipt_content, lifecycle, package_root, markdown, target = _write_repair_current_lifecycle(
+        tmp_path
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    if change == "target-created":
+        target.write_text("{}\n", encoding="utf-8")
+    elif change == "markdown-changed":
+        markdown.write_text("# 変更後\n", encoding="utf-8")
+    else:
+        markdown.unlink()
+
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        **lifecycle,
+    )
+
+    assert status.classification == ORPHAN
+    assert status.reason == FINAL_REPORT_MISSING
+    assert status.current_preconditions == "mismatch"
+    assert status.exit_code == 1
+    assert parse_operation_intent_status_bytes(operation_intent_status_bytes(status)) == status
+
+
+@pytest.mark.parametrize("change", ["removed", "changed"])
+def test_stale_sidecar_current_target_changes_are_mismatch(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    receipt_content, lifecycle, package_root, _, target = _write_repair_current_lifecycle(
+        tmp_path,
+        stale_sidecar=True,
+    )
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    if change == "removed":
+        target.unlink()
+    else:
+        target.write_text("changed\n", encoding="utf-8")
+
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        **lifecycle,
+    )
+
+    assert status.classification == ORPHAN
+    assert status.current_preconditions == "mismatch"
+    assert status.exit_code == 1
+
+
+def test_repair_target_symlink_is_current_precondition_mismatch(tmp_path: Path) -> None:
+    receipt_content, lifecycle, package_root, _, target = _write_repair_current_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside\n", encoding="utf-8")
+    try:
+        target.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    status = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        **lifecycle,
+    )
+
+    assert status.current_preconditions == "mismatch"
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_unsafe_repair_package_root_is_invalid_input(tmp_path: Path) -> None:
+    receipt_content, lifecycle, _, _, _ = _write_repair_current_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+
+    with pytest.raises(IntentStatusInputError):
+        inspect_operation_intent_status(
+            receipt,
+            package_root=tmp_path / "missing-package",
+            **lifecycle,
+        )
+
+
+def test_package_root_requires_complete_repair_lifecycle_inputs(tmp_path: Path) -> None:
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(_repair_receipt())
+
+    with pytest.raises(IntentStatusInputError, match="complete Repair lifecycle"):
+        inspect_operation_intent_status(
+            receipt,
+            package_root=tmp_path / "package",
+        )
+
+
+def test_cleanup_receipt_rejects_repair_package_root_mode(tmp_path: Path) -> None:
+    receipt_content, lifecycle = _write_cleanup_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+
+    with pytest.raises(IntentStatusInputError, match="complete Repair lifecycle"):
+        inspect_operation_intent_status(
+            receipt,
+            package_root=tmp_path / "package",
+            **lifecycle,
+        )
+
+
+@pytest.mark.parametrize("state", ["paired", "conflicting", "stale"])
+def test_non_orphan_status_does_not_inspect_current_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    receipt_content, lifecycle = _write_repair_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    reports: tuple[Path, ...] = ()
+    if state == "paired":
+        report = tmp_path / "report.json"
+        report.write_bytes(_empty_repair_report(receipt_content))
+        reports = (report,)
+    elif state == "conflicting":
+        report = tmp_path / "report.json"
+        report.write_bytes(_repair_report(receipt_content))
+        reports = (report,)
+    else:
+        lifecycle["manifest_path"].write_bytes(
+            lifecycle["manifest_path"].read_bytes().replace(b"{", b"{ ", 1)
+        )
+
+    def fail_if_called(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("current package helper must not be called")
+
+    monkeypatch.setattr(
+        intent_status_module,
+        "repair_preflight_current_state_matches",
+        fail_if_called,
+    )
+    status = inspect_operation_intent_status(
+        receipt,
+        repair_execution_paths=reports,
+        package_root=tmp_path / "intentionally-missing-package",
+        **lifecycle,
+    )
+
+    assert status.classification == state
+    assert status.current_preconditions == "not-applicable"
+    assert parse_operation_intent_status_bytes(operation_intent_status_bytes(status)) == status
+
+
 @pytest.mark.parametrize(
     "changed_input",
     ["manifest_path", "plan_path", "approval_path", "preflight_path"],
@@ -656,6 +966,20 @@ def test_cleanup_orphan_with_complete_lifecycle_inputs_is_verified(tmp_path: Pat
     assert status.classification == ORPHAN
     assert status.lifecycle_inputs == "verified"
     assert status.reason == FINAL_REPORT_MISSING
+
+
+def test_cleanup_status_cannot_claim_repair_current_preconditions(tmp_path: Path) -> None:
+    receipt_content, lifecycle = _write_cleanup_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    status = inspect_operation_intent_status(receipt, **lifecycle)
+    payload = status.payload()
+    bindings = payload["bindings"]
+    assert isinstance(bindings, dict)
+    bindings["current_preconditions"] = "verified"
+
+    with pytest.raises(ValueError, match="semantics"):
+        parse_operation_intent_status_bytes(_payload_bytes(payload))
 
 
 def test_cleanup_orphan_with_action_scope_change_is_stale(tmp_path: Path) -> None:
