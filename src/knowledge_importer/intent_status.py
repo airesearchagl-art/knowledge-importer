@@ -414,6 +414,19 @@ def inspect_operation_intent_status(
                 "Repair lifecycle inputs changed before current precondition verification"
             )
         expected_preflight = parse_repair_preflight_bytes(read_input_bytes(preflight_path))
+        if not expected_preflight.actions:
+            rebound = verify_repair_operation_intent_lifecycle(
+                receipt_content,
+                manifest_path=manifest_path,
+                plan_path=plan_path,
+                approval_path=approval_path,
+                preflight_path=preflight_path,
+            )
+            if not rebound.bindings_match or rebound.action_scope_matches is not True:
+                raise IntentStatusInputError(
+                    "Repair lifecycle inputs changed during current precondition verification"
+                )
+            return replace(status, current_preconditions=NOT_APPLICABLE)
         matches = repair_preflight_current_state_matches(
             package_root,
             manifest_path=manifest_path,
@@ -548,7 +561,7 @@ def parse_operation_intent_status_bytes(content: bytes) -> OperationIntentStatus
         and receipt_final_report == MISSING
         and reason == FINAL_REPORT_MISSING
         and lifecycle_inputs in {NOT_PROVIDED, VERIFIED}
-        and current_preconditions in {NOT_PROVIDED, VERIFIED, MISMATCH}
+        and current_preconditions in {NOT_PROVIDED, VERIFIED, MISMATCH, NOT_APPLICABLE}
         and (
             current_preconditions == NOT_PROVIDED
             or lifecycle_inputs == VERIFIED

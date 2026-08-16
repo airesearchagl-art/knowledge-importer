@@ -677,6 +677,49 @@ def test_repair_orphan_with_complete_lifecycle_inputs_is_verified(tmp_path: Path
     assert {path: path.read_bytes() for path in before} == before
 
 
+def test_zero_action_repair_current_preconditions_are_not_applicable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_content, lifecycle = _write_repair_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    package_root = tmp_path / "package"
+    package_root.mkdir()
+    unrelated = package_root / "unrelated.txt"
+    unrelated.write_text("before\n", encoding="utf-8")
+
+    def fail_if_called(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("zero-action intent must not inspect current package state")
+
+    monkeypatch.setattr(
+        intent_status_module,
+        "repair_preflight_current_state_matches",
+        fail_if_called,
+    )
+    first = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        **lifecycle,
+    )
+    unrelated.write_text("after\n", encoding="utf-8")
+    second = inspect_operation_intent_status(
+        receipt,
+        package_root=package_root,
+        **lifecycle,
+    )
+
+    for status in (first, second):
+        assert status.classification == ORPHAN
+        assert status.reason == FINAL_REPORT_MISSING
+        assert status.lifecycle_inputs == "verified"
+        assert status.current_preconditions == "not-applicable"
+        assert status.operator_action_required
+        assert status.exit_code == 1
+        content = operation_intent_status_bytes(status)
+        assert parse_operation_intent_status_bytes(content) == status
+
+
 def test_repair_orphan_current_package_preconditions_are_verified_read_only(
     tmp_path: Path,
 ) -> None:

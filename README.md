@@ -364,7 +364,7 @@ uv run knowledge-importer intent-status `
 
 Cleanup Receiptでは`--inventory`、`--plan`、`--approval`を同時指定します。Repairは4入力、Cleanupは3入力のall-or-noneで、部分指定やoperation typeに合わない入力は終了コード`2`です。lifecycle入力はstable readした実bytesのSHA-256とcanonical action scopeをReceiptへ照合し、parse後payloadの再serialize hash、filename、path、mtimeはidentityに使いません。
 
-Repair Receiptでは`--package-root`を指定すると、final reportがない`orphan`かつlifecycle入力が完全一致する場合だけ、Receipt-bound Preflightと現在のpackageをread-onlyで比較します。一致時は`current_preconditions=verified`、targetの出現・消失、Markdown／sidecar digest変更、unsafe target・root escape時は`mismatch`です。package root自体が不存在、symlink、junction、reparse pointの場合はStatusを生成せず終了コード`2`です。`--package-root`にはRepair lifecycle 4入力が必須で、Cleanup Receiptには使用できません。paired／conflicting／staleではfilesystemを検査せず`not-applicable`とします。Cleanup current precondition検証は未実装です。
+Repair Receiptでは`--package-root`を指定すると、final reportがない`orphan`かつlifecycle入力が完全一致する場合だけ、Receipt-bound Preflightと現在のpackageをread-onlyで比較します。一致時は`current_preconditions=verified`、targetの出現・消失、Markdown／sidecar digest変更、unsafe target・root escape時は`mismatch`です。Receipt-bound Repair actionが0件の場合は検証対象がないためpackageを検査せず`current_preconditions=not-applicable`とし、`verified`は1件以上のactionを照合した場合だけ使用します。package root自体が不存在、symlink、junction、reparse pointの場合はStatusを生成せず終了コード`2`です。`--package-root`にはRepair lifecycle 4入力が必須で、Cleanup Receiptには使用できません。paired／conflicting／staleではfilesystemを検査せず`not-applicable`とします。Cleanup current precondition検証は未実装です。
 
 Receipt exact bytesのSHA-256をidentityとし、`attempt_id`だけではpairingしません。Receipt SHA-256、`attempt_id`、`operation_type`、action scope、final reportが保持するlifecycle digestを比較し、結果をstdoutへ決定的なJSONで出力します。Repair final reportにはArtifact Manifest digestがないため、final reportだけではそのdigestを再検証済みとは扱いません。
 
