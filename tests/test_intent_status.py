@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unicodedata
 from collections.abc import Callable
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from knowledge_importer.artifact_manifest import ArtifactManifest, ArtifactManifestSettings
+from knowledge_importer.backup_cleanup_approval import BackupCleanupApproval
 from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAudit,
     BackupCleanupAuditAction,
@@ -15,6 +18,8 @@ from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAuditStatus,
     backup_cleanup_audit_bytes,
 )
+from knowledge_importer.backup_cleanup_plan import BackupCleanupPlan
+from knowledge_importer.backup_inventory import BackupInventory
 from knowledge_importer.intent_status import (
     ACTION_SCOPE_MISMATCH,
     ATTEMPT_ID_MISMATCH,
@@ -22,11 +27,14 @@ from knowledge_importer.intent_status import (
     CONFLICTING,
     FINAL_REPORT_MISSING,
     LEGACY_FINAL_REPORT,
+    LIFECYCLE_ACTION_SCOPE_MISMATCH,
+    LIFECYCLE_BINDING_MISMATCH,
     MULTIPLE_FINAL_REPORTS,
     OPERATION_TYPE_MISMATCH,
     ORPHAN,
     PAIRED,
     RECEIPT_SHA256_MISMATCH,
+    STALE,
     IntentStatusInputError,
     build_operation_intent_status,
     inspect_operation_intent_status,
@@ -38,18 +46,103 @@ from knowledge_importer.operation_intent import (
     REPAIR_EXECUTION,
     OperationIntentAction,
     OperationIntentBinding,
+    OperationIntentLifecycleVerification,
     OperationIntentReceipt,
     operation_intent_bytes,
     operation_intent_sha256,
+    parse_operation_intent_bytes,
 )
+from knowledge_importer.repair_approval import RepairApproval
 from knowledge_importer.repair_execution import (
     ExecutionActionResult,
     RepairExecutionIntentReceipt,
     RepairExecutionReport,
     repair_execution_report_bytes,
 )
-from knowledge_importer.repair_plan import RepairAction, RepairActionCategory
-from knowledge_importer.repair_preflight import PreflightTarget
+from knowledge_importer.repair_plan import RepairAction, RepairActionCategory, RepairPlan
+from knowledge_importer.repair_preflight import PreflightTarget, RepairPreflight
+
+
+def _payload_bytes(payload: dict[str, object]) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode()
+
+
+def _sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _write_repair_lifecycle(tmp_path: Path) -> tuple[bytes, dict[str, Path]]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    manifest = tmp_path / "manifest.json"
+    plan = tmp_path / "plan.json"
+    approval = tmp_path / "approval.json"
+    preflight = tmp_path / "preflight.json"
+    manifest.write_bytes(_payload_bytes(ArtifactManifest(ArtifactManifestSettings(), ()).payload()))
+    plan.write_bytes(_payload_bytes(RepairPlan(0, ()).payload()))
+    approval.write_bytes(_payload_bytes(RepairApproval(_sha256(plan.read_bytes()), ()).payload()))
+    preflight.write_bytes(
+        _payload_bytes(
+            RepairPreflight(
+                _sha256(plan.read_bytes()),
+                _sha256(approval.read_bytes()),
+                (),
+            ).payload()
+        )
+    )
+    paths = {
+        "manifest_path": manifest,
+        "plan_path": plan,
+        "approval_path": approval,
+        "preflight_path": preflight,
+    }
+    receipt = operation_intent_bytes(
+        OperationIntentReceipt(
+            "repair-freshness-001",
+            REPAIR_EXECUTION,
+            (
+                OperationIntentBinding("artifact-manifest", 1, _sha256(manifest.read_bytes())),
+                OperationIntentBinding("repair-plan", 1, _sha256(plan.read_bytes())),
+                OperationIntentBinding("repair-approval", 1, _sha256(approval.read_bytes())),
+                OperationIntentBinding("repair-preflight", 1, _sha256(preflight.read_bytes())),
+            ),
+            (),
+        )
+    )
+    return receipt, paths
+
+
+def _write_cleanup_lifecycle(tmp_path: Path) -> tuple[bytes, dict[str, Path]]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    inventory = tmp_path / "inventory.json"
+    plan = tmp_path / "cleanup-plan.json"
+    approval = tmp_path / "cleanup-approval.json"
+    inventory.write_bytes(_payload_bytes(BackupInventory(()).payload()))
+    plan.write_bytes(
+        _payload_bytes(BackupCleanupPlan(_sha256(inventory.read_bytes()), ()).payload())
+    )
+    approval.write_bytes(
+        _payload_bytes(BackupCleanupApproval(_sha256(plan.read_bytes()), ()).payload())
+    )
+    paths = {
+        "inventory_path": inventory,
+        "plan_path": plan,
+        "approval_path": approval,
+    }
+    receipt = operation_intent_bytes(
+        OperationIntentReceipt(
+            "cleanup-freshness-001",
+            BACKUP_CLEANUP,
+            (
+                OperationIntentBinding("backup-inventory", 1, _sha256(inventory.read_bytes())),
+                OperationIntentBinding("backup-cleanup-plan", 1, _sha256(plan.read_bytes())),
+                OperationIntentBinding(
+                    "backup-cleanup-approval", 1, _sha256(approval.read_bytes())
+                ),
+            ),
+            (),
+        )
+    )
+    return receipt, paths
 
 
 def _repair_receipt(*, attempt_id: str = "repair-attempt-001") -> bytes:
@@ -114,6 +207,25 @@ def _repair_report(
             (result,),
             "passed",
             binding,
+        )
+    )
+
+
+def _empty_repair_report(receipt: bytes) -> bytes:
+    parsed = parse_operation_intent_bytes(receipt)
+    bindings = {binding.artifact_type: binding.sha256 for binding in parsed.bindings}
+    return repair_execution_report_bytes(
+        RepairExecutionReport(
+            bindings["repair-plan"],
+            bindings["repair-approval"],
+            bindings["repair-preflight"],
+            (),
+            "passed",
+            RepairExecutionIntentReceipt(
+                1,
+                parsed.attempt_id,
+                operation_intent_sha256(receipt),
+            ),
         )
     )
 
@@ -431,3 +543,234 @@ def test_status_inspection_never_changes_source_bytes(
 
     assert status.classification == PAIRED
     assert {path: path.read_bytes() for path in (receipt, report)} == before
+
+
+def test_repair_orphan_with_complete_lifecycle_inputs_is_verified(tmp_path: Path) -> None:
+    receipt_content, lifecycle = _write_repair_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    before = {path: path.read_bytes() for path in (receipt, *lifecycle.values())}
+
+    status = inspect_operation_intent_status(receipt, **lifecycle)
+
+    assert status.classification == ORPHAN
+    assert status.reason == FINAL_REPORT_MISSING
+    assert status.lifecycle_inputs == "verified"
+    assert status.current_preconditions == "not-provided"
+    assert status.exit_code == 1
+    assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize(
+    "changed_input",
+    ["manifest_path", "plan_path", "approval_path", "preflight_path"],
+)
+def test_repair_orphan_with_one_byte_lifecycle_change_is_stale(
+    tmp_path: Path,
+    changed_input: str,
+) -> None:
+    receipt_content, lifecycle = _write_repair_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    changed_path = lifecycle[changed_input]
+    changed_path.write_bytes(changed_path.read_bytes().replace(b"{", b"{ ", 1))
+
+    status = inspect_operation_intent_status(receipt, **lifecycle)
+
+    assert status.classification == STALE
+    assert status.reason == LIFECYCLE_BINDING_MISMATCH
+    assert status.lifecycle_inputs == "mismatch"
+    assert status.operator_action_required
+    assert status.exit_code == 1
+
+
+def test_repair_orphan_with_action_scope_change_is_stale(tmp_path: Path) -> None:
+    original_receipt, lifecycle = _write_repair_lifecycle(tmp_path)
+    parsed = parse_operation_intent_bytes(original_receipt)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(
+        operation_intent_bytes(
+            OperationIntentReceipt(
+                parsed.attempt_id,
+                parsed.operation_type,
+                parsed.bindings,
+                (
+                    OperationIntentAction(
+                        0,
+                        "regenerate-sidecar",
+                        "documents/item.metadata.json",
+                        "missing-sidecar",
+                    ),
+                ),
+            )
+        )
+    )
+
+    status = inspect_operation_intent_status(receipt, **lifecycle)
+
+    assert status.classification == STALE
+    assert status.reason == LIFECYCLE_ACTION_SCOPE_MISMATCH
+    assert status.lifecycle_inputs == "mismatch"
+
+
+def test_paired_repair_reports_lifecycle_freshness_without_reclassification(
+    tmp_path: Path,
+) -> None:
+    receipt_content, lifecycle = _write_repair_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    report = tmp_path / "execution.json"
+    receipt.write_bytes(receipt_content)
+    report.write_bytes(_empty_repair_report(receipt_content))
+
+    verified = inspect_operation_intent_status(
+        receipt,
+        repair_execution_paths=(report,),
+        **lifecycle,
+    )
+    lifecycle["manifest_path"].write_bytes(
+        lifecycle["manifest_path"].read_bytes().replace(b"{", b"{ ", 1)
+    )
+    mismatch = inspect_operation_intent_status(
+        receipt,
+        repair_execution_paths=(report,),
+        **lifecycle,
+    )
+
+    assert verified.classification == PAIRED
+    assert verified.lifecycle_inputs == "verified"
+    assert verified.current_preconditions == "not-applicable"
+    assert not verified.operator_action_required
+    assert mismatch.classification == PAIRED
+    assert mismatch.lifecycle_inputs == "mismatch"
+    assert mismatch.reason == LIFECYCLE_BINDING_MISMATCH
+    assert mismatch.operator_action_required
+
+
+def test_cleanup_orphan_with_complete_lifecycle_inputs_is_verified(tmp_path: Path) -> None:
+    receipt_content, lifecycle = _write_cleanup_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+
+    status = inspect_operation_intent_status(receipt, **lifecycle)
+
+    assert status.classification == ORPHAN
+    assert status.lifecycle_inputs == "verified"
+    assert status.reason == FINAL_REPORT_MISSING
+
+
+def test_cleanup_orphan_with_action_scope_change_is_stale(tmp_path: Path) -> None:
+    original_receipt, lifecycle = _write_cleanup_lifecycle(tmp_path)
+    parsed = parse_operation_intent_bytes(original_receipt)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(
+        operation_intent_bytes(
+            OperationIntentReceipt(
+                parsed.attempt_id,
+                parsed.operation_type,
+                parsed.bindings,
+                (
+                    OperationIntentAction(
+                        0,
+                        "delete-backup-session",
+                        "knowledge-importer-repair-v1-other",
+                        "explicit-retention-release",
+                    ),
+                ),
+            )
+        )
+    )
+
+    status = inspect_operation_intent_status(receipt, **lifecycle)
+
+    assert status.classification == STALE
+    assert status.reason == LIFECYCLE_ACTION_SCOPE_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "changed_input",
+    ["inventory_path", "plan_path", "approval_path"],
+)
+def test_cleanup_orphan_with_one_byte_lifecycle_change_is_stale(
+    tmp_path: Path,
+    changed_input: str,
+) -> None:
+    receipt_content, lifecycle = _write_cleanup_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    changed_path = lifecycle[changed_input]
+    changed_path.write_bytes(changed_path.read_bytes().replace(b"{", b"{ ", 1))
+
+    status = inspect_operation_intent_status(receipt, **lifecycle)
+
+    assert status.classification == STALE
+    assert status.reason == LIFECYCLE_BINDING_MISMATCH
+    assert status.lifecycle_inputs == "mismatch"
+
+
+def test_partial_or_wrong_lifecycle_inputs_are_invalid(tmp_path: Path) -> None:
+    receipt_content, lifecycle = _write_repair_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+
+    with pytest.raises(IntentStatusInputError, match="complete set"):
+        inspect_operation_intent_status(receipt, plan_path=lifecycle["plan_path"])
+    with pytest.raises(IntentStatusInputError, match="complete set"):
+        inspect_operation_intent_status(
+            receipt,
+            **lifecycle,
+            inventory_path=tmp_path / "inventory.json",
+        )
+
+    cleanup_content, cleanup = _write_cleanup_lifecycle(tmp_path / "cleanup")
+    cleanup_receipt = tmp_path / "cleanup-intent.json"
+    cleanup_receipt.write_bytes(cleanup_content)
+    with pytest.raises(IntentStatusInputError, match="complete set"):
+        inspect_operation_intent_status(
+            cleanup_receipt,
+            plan_path=cleanup["plan_path"],
+        )
+
+
+def test_invalid_complete_lifecycle_input_is_not_classified(tmp_path: Path) -> None:
+    receipt_content, lifecycle = _write_repair_lifecycle(tmp_path)
+    receipt = tmp_path / "intent.json"
+    receipt.write_bytes(receipt_content)
+    lifecycle["plan_path"].write_bytes(b"not-json")
+
+    with pytest.raises(IntentStatusInputError):
+        inspect_operation_intent_status(receipt, **lifecycle)
+
+
+def test_paired_lifecycle_mismatch_stays_paired_and_requires_action() -> None:
+    receipt = _repair_receipt()
+    report = _repair_report(receipt)
+
+    status = build_operation_intent_status(
+        receipt,
+        repair_execution_contents=(report,),
+        lifecycle_verification=OperationIntentLifecycleVerification(False, None),
+    )
+
+    assert status.classification == PAIRED
+    assert status.reason == LIFECYCLE_BINDING_MISMATCH
+    assert status.lifecycle_inputs == "mismatch"
+    assert status.current_preconditions == "not-applicable"
+    assert status.operator_action_required
+    assert status.exit_code == 0
+    assert parse_operation_intent_status_bytes(operation_intent_status_bytes(status)) == status
+
+
+def test_conflicting_classification_survives_lifecycle_mismatch() -> None:
+    receipt = _repair_receipt()
+    report = _repair_report(receipt, receipt_sha256="0" * 64)
+
+    status = build_operation_intent_status(
+        receipt,
+        repair_execution_contents=(report,),
+        lifecycle_verification=OperationIntentLifecycleVerification(False, None),
+    )
+
+    assert status.classification == CONFLICTING
+    assert status.reason == RECEIPT_SHA256_MISMATCH
+    assert status.lifecycle_inputs == "mismatch"
+    assert status.exit_code == 1

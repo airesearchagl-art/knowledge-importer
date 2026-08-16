@@ -298,6 +298,11 @@ def test_intent_status_help_describes_receipt_and_repeatable_final_reports(
     assert "--intent-receipt PATH" in help_text
     assert "--repair-execution PATH" in help_text
     assert "--backup-cleanup-audit PATH" in help_text
+    assert "--manifest PATH" in help_text
+    assert "--inventory PATH" in help_text
+    assert "--plan PATH" in help_text
+    assert "--approval PATH" in help_text
+    assert "--preflight PATH" in help_text
 
 
 def test_intent_status_cli_emits_paired_json_without_changing_sources(
@@ -345,6 +350,33 @@ def test_intent_status_cli_reports_orphan_without_inferring_execution(
     assert payload["classification"] == "orphan"
     assert payload["reason"] == "final-report-missing"
     assert payload["operator_action_required"] is True
+
+
+def test_intent_status_cli_rejects_partial_lifecycle_inputs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt = tmp_path / "intent.json"
+    unused_report = tmp_path / "unused.json"
+    plan = tmp_path / "plan.json"
+    _write_empty_repair_intent_pair(receipt, unused_report)
+    plan.write_text("{}", encoding="utf-8")
+
+    exit_code = run(
+        [
+            "intent-status",
+            "--intent-receipt",
+            str(receipt),
+            "--plan",
+            str(plan),
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == 2
+    assert output.out == ""
+    assert str(tmp_path) not in output.err
+    assert "Traceback" not in output.err
 
 
 def test_intent_status_cli_rejects_duplicate_final_bytes(

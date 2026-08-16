@@ -15,7 +15,10 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 
 from knowledge_importer.artifact_manifest import ArtifactDigest
-from knowledge_importer.backup_cleanup_approval import verify_backup_cleanup_approval
+from knowledge_importer.backup_cleanup_approval import (
+    parse_backup_cleanup_approval_bytes,
+    verify_backup_cleanup_approval,
+)
 from knowledge_importer.backup_cleanup_plan import (
     BackupCleanupAction,
     parse_backup_cleanup_plan_bytes,
@@ -41,6 +44,7 @@ from knowledge_importer.operation_intent import (
     OPERATION_INTENT_SCHEMA_VERSION,
     OperationIntentAction,
     OperationIntentBinding,
+    OperationIntentLifecycleVerification,
     OperationIntentReceipt,
     operation_intent_sha256,
     parse_operation_intent_bytes,
@@ -471,6 +475,56 @@ def _cleanup_intent_actions(
             "explicit-retention-release",
         )
         for index, action in enumerate(actions)
+    )
+
+
+def verify_backup_cleanup_operation_intent_lifecycle(
+    receipt_content: bytes,
+    *,
+    inventory_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+) -> OperationIntentLifecycleVerification:
+    """Compare stable current Cleanup lifecycle inputs without inspecting backup state."""
+
+    receipt = parse_operation_intent_bytes(receipt_content)
+    if receipt.operation_type != BACKUP_CLEANUP:
+        raise BackupCleanupExecutionInputError("Receipt operation type mismatch")
+    try:
+        inventory_content = read_input_bytes(inventory_path)
+        plan_content = read_input_bytes(plan_path)
+        approval_content = read_input_bytes(approval_path)
+        parse_backup_inventory_bytes(inventory_content)
+        parse_backup_cleanup_plan_bytes(plan_content)
+        parse_backup_cleanup_approval_bytes(approval_content)
+        stable_contents = (
+            read_input_bytes(inventory_path),
+            read_input_bytes(plan_path),
+            read_input_bytes(approval_path),
+        )
+    except (OSError, ValueError) as exc:
+        raise BackupCleanupExecutionInputError("invalid Cleanup lifecycle input") from exc
+    contents = (inventory_content, plan_content, approval_content)
+    if contents != stable_contents:
+        raise BackupCleanupExecutionInputError(
+            "Cleanup lifecycle inputs changed during verification"
+        )
+    current_bindings = (
+        OperationIntentBinding("backup-inventory", 1, _sha256(inventory_content)),
+        OperationIntentBinding("backup-cleanup-plan", 1, _sha256(plan_content)),
+        OperationIntentBinding("backup-cleanup-approval", 1, _sha256(approval_content)),
+    )
+    if receipt.bindings != current_bindings:
+        return OperationIntentLifecycleVerification(False, None)
+
+    inputs = _load_execution_inputs(inventory_path, plan_path, approval_path)
+    if _cleanup_intent_bindings(inputs) != current_bindings:
+        raise BackupCleanupExecutionInputError(
+            "Cleanup lifecycle inputs changed during verification"
+        )
+    return OperationIntentLifecycleVerification(
+        True,
+        receipt.actions == _cleanup_intent_actions(inputs.actions),
     )
 
 

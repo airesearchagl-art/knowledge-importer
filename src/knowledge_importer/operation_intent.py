@@ -102,6 +102,24 @@ class OperationIntentReceipt:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class OperationIntentLifecycleVerification:
+    """Read-only comparison of current lifecycle inputs with one Receipt."""
+
+    bindings_match: bool
+    action_scope_matches: bool | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.bindings_match, bool) or self.bindings_match != (
+            self.action_scope_matches is not None
+        ):
+            raise ValueError("invalid lifecycle verification result")
+        if self.action_scope_matches is not None and not isinstance(
+            self.action_scope_matches, bool
+        ):
+            raise ValueError("invalid lifecycle action scope result")
+
+
 def _is_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 

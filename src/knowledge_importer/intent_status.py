@@ -9,12 +9,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from knowledge_importer.backup_cleanup_execution import parse_backup_cleanup_audit_bytes
+from knowledge_importer.backup_cleanup_execution import (
+    parse_backup_cleanup_audit_bytes,
+    verify_backup_cleanup_operation_intent_lifecycle,
+)
 from knowledge_importer.backup_cleanup_plan import read_input_bytes
 from knowledge_importer.operation_intent import (
     BACKUP_CLEANUP,
     REPAIR_EXECUTION,
     OperationIntentAction,
+    OperationIntentLifecycleVerification,
     OperationIntentReceipt,
     operation_intent_sha256,
     parse_operation_intent_bytes,
@@ -24,7 +28,10 @@ from knowledge_importer.operational_audit import (
     BACKUP_CLEANUP_SOURCE,
     REPAIR_EXECUTION_SOURCE,
 )
-from knowledge_importer.repair_execution import parse_repair_execution_report_bytes
+from knowledge_importer.repair_execution import (
+    parse_repair_execution_report_bytes,
+    verify_repair_operation_intent_lifecycle,
+)
 
 INTENT_STATUS_REPORT_TYPE = "knowledge-importer-operation-intent-status"
 INTENT_STATUS_SCHEMA_VERSION = 1
@@ -32,10 +39,13 @@ INTENT_STATUS_SCHEMA_VERSION = 1
 PAIRED = "paired"
 ORPHAN = "orphan"
 CONFLICTING = "conflicting"
+STALE = "stale"
 
 VERIFIED = "verified"
 MISSING = "missing"
 NOT_PROVIDED = "not-provided"
+MISMATCH = "mismatch"
+NOT_APPLICABLE = "not-applicable"
 
 FINAL_REPORT_MISSING = "final-report-missing"
 MULTIPLE_FINAL_REPORTS = "multiple-final-reports"
@@ -45,9 +55,11 @@ OPERATION_TYPE_MISMATCH = "operation-type-mismatch"
 ACTION_SCOPE_MISMATCH = "action-scope-mismatch"
 BINDING_SCOPE_MISMATCH = "binding-scope-mismatch"
 LEGACY_FINAL_REPORT = "legacy-final-report"
+LIFECYCLE_BINDING_MISMATCH = "lifecycle-binding-mismatch"
+LIFECYCLE_ACTION_SCOPE_MISMATCH = "lifecycle-action-scope-mismatch"
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_CLASSIFICATIONS = {PAIRED, ORPHAN, CONFLICTING}
+_CLASSIFICATIONS = {PAIRED, ORPHAN, STALE, CONFLICTING}
 _CONFLICT_REASONS = {
     MULTIPLE_FINAL_REPORTS,
     RECEIPT_SHA256_MISMATCH,
@@ -93,10 +105,12 @@ class OperationIntentStatus:
     final_reports: tuple[IntentStatusFinalReport, ...]
     receipt_final_report: str
     reason: str
+    lifecycle_inputs: str = NOT_PROVIDED
+    current_preconditions: str = NOT_PROVIDED
 
     @property
     def operator_action_required(self) -> bool:
-        return self.classification != PAIRED
+        return self.classification != PAIRED or self.lifecycle_inputs == MISMATCH
 
     @property
     def exit_code(self) -> int:
@@ -111,8 +125,8 @@ class OperationIntentStatus:
             "final_reports": [report.payload() for report in self.final_reports],
             "bindings": {
                 "receipt_final_report": self.receipt_final_report,
-                "lifecycle_inputs": NOT_PROVIDED,
-                "current_preconditions": NOT_PROVIDED,
+                "lifecycle_inputs": self.lifecycle_inputs,
+                "current_preconditions": self.current_preconditions,
             },
             "operator_action_required": self.operator_action_required,
             "reason": self.reason,
@@ -212,6 +226,7 @@ def build_operation_intent_status(
     *,
     repair_execution_contents: Sequence[bytes] = (),
     backup_cleanup_audit_contents: Sequence[bytes] = (),
+    lifecycle_verification: OperationIntentLifecycleVerification | None = None,
 ) -> OperationIntentStatus:
     """Classify one Receipt against zero or more exact final report byte sources."""
 
@@ -235,13 +250,29 @@ def build_operation_intent_status(
         receipt.attempt_id,
     )
     final_reports = tuple(item.descriptor for item in evidence)
+    if lifecycle_verification is None:
+        lifecycle_inputs = NOT_PROVIDED
+        lifecycle_reason = None
+    elif not lifecycle_verification.bindings_match:
+        lifecycle_inputs = MISMATCH
+        lifecycle_reason = LIFECYCLE_BINDING_MISMATCH
+    elif lifecycle_verification.action_scope_matches is False:
+        lifecycle_inputs = MISMATCH
+        lifecycle_reason = LIFECYCLE_ACTION_SCOPE_MISMATCH
+    else:
+        lifecycle_inputs = VERIFIED
+        lifecycle_reason = None
+
     if not evidence:
+        classification = STALE if lifecycle_reason is not None else ORPHAN
         return OperationIntentStatus(
             descriptor,
-            ORPHAN,
+            classification,
             (),
             MISSING,
-            FINAL_REPORT_MISSING,
+            lifecycle_reason or FINAL_REPORT_MISSING,
+            lifecycle_inputs,
+            NOT_PROVIDED,
         )
     if len(evidence) > 1:
         return OperationIntentStatus(
@@ -250,6 +281,8 @@ def build_operation_intent_status(
             final_reports,
             CONFLICTING,
             MULTIPLE_FINAL_REPORTS,
+            lifecycle_inputs,
+            NOT_PROVIDED,
         )
     reason = _conflict_reason(receipt, receipt_sha256, evidence[0])
     if reason is not None:
@@ -259,13 +292,17 @@ def build_operation_intent_status(
             final_reports,
             CONFLICTING,
             reason,
+            lifecycle_inputs,
+            NOT_PROVIDED,
         )
     return OperationIntentStatus(
         descriptor,
         PAIRED,
         final_reports,
         VERIFIED,
-        PAIRED,
+        lifecycle_reason or PAIRED,
+        lifecycle_inputs,
+        NOT_PROVIDED if lifecycle_verification is None else NOT_APPLICABLE,
     )
 
 
@@ -274,18 +311,72 @@ def inspect_operation_intent_status(
     *,
     repair_execution_paths: Sequence[Path] = (),
     backup_cleanup_audit_paths: Sequence[Path] = (),
+    manifest_path: Path | None = None,
+    inventory_path: Path | None = None,
+    plan_path: Path | None = None,
+    approval_path: Path | None = None,
+    preflight_path: Path | None = None,
 ) -> OperationIntentStatus:
     """Stable-read source artifacts and return a read-only pairing snapshot."""
 
     try:
+        receipt_content = read_input_bytes(receipt_path)
+        receipt = parse_operation_intent_bytes(receipt_content)
+        lifecycle_paths = (
+            manifest_path,
+            inventory_path,
+            plan_path,
+            approval_path,
+            preflight_path,
+        )
+        lifecycle_verification = None
+        if any(path is not None for path in lifecycle_paths):
+            if receipt.operation_type == REPAIR_EXECUTION:
+                if inventory_path is not None or any(
+                    path is None
+                    for path in (manifest_path, plan_path, approval_path, preflight_path)
+                ):
+                    raise IntentStatusInputError(
+                        "Repair lifecycle inputs must be provided as a complete set"
+                    )
+                assert manifest_path is not None
+                assert plan_path is not None
+                assert approval_path is not None
+                assert preflight_path is not None
+                lifecycle_verification = verify_repair_operation_intent_lifecycle(
+                    receipt_content,
+                    manifest_path=manifest_path,
+                    plan_path=plan_path,
+                    approval_path=approval_path,
+                    preflight_path=preflight_path,
+                )
+            else:
+                if (
+                    manifest_path is not None
+                    or preflight_path is not None
+                    or any(path is None for path in (inventory_path, plan_path, approval_path))
+                ):
+                    raise IntentStatusInputError(
+                        "Cleanup lifecycle inputs must be provided as a complete set"
+                    )
+                assert inventory_path is not None
+                assert plan_path is not None
+                assert approval_path is not None
+                lifecycle_verification = verify_backup_cleanup_operation_intent_lifecycle(
+                    receipt_content,
+                    inventory_path=inventory_path,
+                    plan_path=plan_path,
+                    approval_path=approval_path,
+                )
         return build_operation_intent_status(
-            read_input_bytes(receipt_path),
+            receipt_content,
             repair_execution_contents=tuple(
                 read_input_bytes(path) for path in repair_execution_paths
             ),
             backup_cleanup_audit_contents=tuple(
                 read_input_bytes(path) for path in backup_cleanup_audit_paths
             ),
+            lifecycle_verification=lifecycle_verification,
         )
     except (OSError, TypeError, ValueError) as exc:
         if isinstance(exc, IntentStatusInputError):
@@ -356,10 +447,12 @@ def parse_operation_intent_status_bytes(content: bytes) -> OperationIntentStatus
         raise ValueError("invalid Operation Intent Status final report order")
 
     receipt_final_report = bindings.get("receipt_final_report")
+    lifecycle_inputs = bindings.get("lifecycle_inputs")
+    current_preconditions = bindings.get("current_preconditions")
     if not (
         receipt_final_report in {VERIFIED, MISSING, CONFLICTING}
-        and bindings.get("lifecycle_inputs") == NOT_PROVIDED
-        and bindings.get("current_preconditions") == NOT_PROVIDED
+        and lifecycle_inputs in {NOT_PROVIDED, VERIFIED, MISMATCH}
+        and current_preconditions in {NOT_PROVIDED, VERIFIED, MISMATCH, NOT_APPLICABLE}
     ):
         raise ValueError("invalid Operation Intent Status binding state")
 
@@ -372,22 +465,46 @@ def parse_operation_intent_status_bytes(content: bytes) -> OperationIntentStatus
     source_type_matches = (
         len(final_reports) == 1 and final_reports[0].source_type == expected_source_type
     )
+    lifecycle_reason = reason in {
+        LIFECYCLE_BINDING_MISMATCH,
+        LIFECYCLE_ACTION_SCOPE_MISMATCH,
+    }
     semantic_valid = (
         classification == PAIRED
         and len(final_reports) == 1
         and source_type_matches
         and receipt_final_report == VERIFIED
-        and reason == PAIRED
-        and not operator_action_required
+        and (
+            lifecycle_inputs in {NOT_PROVIDED, VERIFIED}
+            and reason == PAIRED
+            and not operator_action_required
+            and current_preconditions
+            == (NOT_PROVIDED if lifecycle_inputs == NOT_PROVIDED else NOT_APPLICABLE)
+            or lifecycle_inputs == MISMATCH
+            and lifecycle_reason
+            and operator_action_required
+            and current_preconditions == NOT_APPLICABLE
+        )
         or classification == ORPHAN
         and not final_reports
         and receipt_final_report == MISSING
         and reason == FINAL_REPORT_MISSING
+        and lifecycle_inputs in {NOT_PROVIDED, VERIFIED}
+        and current_preconditions == NOT_PROVIDED
+        and operator_action_required
+        or classification == STALE
+        and not final_reports
+        and receipt_final_report == MISSING
+        and lifecycle_inputs == MISMATCH
+        and current_preconditions == NOT_PROVIDED
+        and lifecycle_reason
         and operator_action_required
         or classification == CONFLICTING
         and bool(final_reports)
         and receipt_final_report == CONFLICTING
         and reason in _CONFLICT_REASONS
+        and lifecycle_inputs in {NOT_PROVIDED, VERIFIED, MISMATCH}
+        and current_preconditions == NOT_PROVIDED
         and (len(final_reports) > 1) == (reason == MULTIPLE_FINAL_REPORTS)
         and (len(final_reports) > 1 or (reason == OPERATION_TYPE_MISMATCH) != source_type_matches)
         and operator_action_required
@@ -400,6 +517,8 @@ def parse_operation_intent_status_bytes(content: bytes) -> OperationIntentStatus
         tuple(final_reports),
         receipt_final_report,
         reason,
+        lifecycle_inputs,
+        current_preconditions,
     )
 
 
