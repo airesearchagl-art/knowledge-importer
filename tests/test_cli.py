@@ -19,6 +19,18 @@ from knowledge_importer.cli import (
 )
 from knowledge_importer.converter import Converter
 from knowledge_importer.models import ConversionRequest, KnowledgeImporterError
+from knowledge_importer.operation_intent import (
+    REPAIR_EXECUTION,
+    OperationIntentBinding,
+    OperationIntentReceipt,
+    operation_intent_bytes,
+    operation_intent_sha256,
+)
+from knowledge_importer.repair_execution import (
+    RepairExecutionIntentReceipt,
+    RepairExecutionReport,
+    repair_execution_report_bytes,
+)
 
 
 class FakeConverter:
@@ -95,6 +107,39 @@ def _write_empty_repair_execution(path: Path) -> None:
     )
 
 
+def _write_empty_repair_intent_pair(receipt_path: Path, report_path: Path) -> None:
+    receipt_bytes = operation_intent_bytes(
+        OperationIntentReceipt(
+            "repair-cli-attempt-001",
+            REPAIR_EXECUTION,
+            (
+                OperationIntentBinding("artifact-manifest", 1, "a" * 64),
+                OperationIntentBinding("repair-plan", 1, "b" * 64),
+                OperationIntentBinding("repair-approval", 1, "c" * 64),
+                OperationIntentBinding("repair-preflight", 1, "d" * 64),
+            ),
+            (),
+        )
+    )
+    receipt_path.write_bytes(receipt_bytes)
+    report_path.write_bytes(
+        repair_execution_report_bytes(
+            RepairExecutionReport(
+                "b" * 64,
+                "c" * 64,
+                "d" * 64,
+                (),
+                "not-run",
+                RepairExecutionIntentReceipt(
+                    1,
+                    "repair-cli-attempt-001",
+                    operation_intent_sha256(receipt_bytes),
+                ),
+            )
+        )
+    )
+
+
 def test_help_describes_convert_command() -> None:
     help_text = build_parser().format_help()
 
@@ -107,6 +152,7 @@ def test_help_describes_convert_command() -> None:
     assert "approve-backup-cleanup" in help_text
     assert "backup-cleanup-execute" in help_text
     assert "audit" in help_text
+    assert "intent-status" in help_text
     assert "knowledge-importer" in help_text
 
 
@@ -239,6 +285,141 @@ def test_audit_verify_help_describes_summary_and_repeatable_sources(capsys: obje
     assert "OPERATIONAL_AUDIT_JSON" in help_text
     assert "--repair-execution PATH" in help_text
     assert "--backup-cleanup-audit PATH" in help_text
+
+
+def test_intent_status_help_describes_receipt_and_repeatable_final_reports(
+    capsys: object,
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["intent-status", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "--intent-receipt PATH" in help_text
+    assert "--repair-execution PATH" in help_text
+    assert "--backup-cleanup-audit PATH" in help_text
+
+
+def test_intent_status_cli_emits_paired_json_without_changing_sources(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt = tmp_path / "intent.json"
+    report = tmp_path / "execution.json"
+    _write_empty_repair_intent_pair(receipt, report)
+    before = {path: path.read_bytes() for path in (receipt, report)}
+
+    exit_code = run(
+        [
+            "intent-status",
+            "--intent-receipt",
+            str(receipt),
+            "--repair-execution",
+            str(report),
+        ]
+    )
+
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert exit_code == 0
+    assert output.err == ""
+    assert payload["classification"] == "paired"
+    assert payload["reason"] == "paired"
+    assert str(tmp_path) not in output.out
+    assert {path: path.read_bytes() for path in (receipt, report)} == before
+
+
+def test_intent_status_cli_reports_orphan_without_inferring_execution(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt = tmp_path / "intent.json"
+    unused_report = tmp_path / "unused.json"
+    _write_empty_repair_intent_pair(receipt, unused_report)
+
+    assert run(["intent-status", "--intent-receipt", str(receipt)]) == 1
+
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert output.err == ""
+    assert payload["classification"] == "orphan"
+    assert payload["reason"] == "final-report-missing"
+    assert payload["operator_action_required"] is True
+
+
+def test_intent_status_cli_rejects_duplicate_final_bytes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt = tmp_path / "intent.json"
+    report = tmp_path / "execution.json"
+    _write_empty_repair_intent_pair(receipt, report)
+
+    exit_code = run(
+        [
+            "intent-status",
+            "--intent-receipt",
+            str(receipt),
+            "--repair-execution",
+            str(report),
+            "--repair-execution",
+            str(report),
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == 2
+    assert output.out == ""
+    assert output.err == "Intent Statusの入力を検証できませんでした。\n"
+    assert str(tmp_path) not in output.err
+    assert "Traceback" not in output.err
+
+
+def test_intent_status_cli_requires_exactly_one_receipt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = tmp_path / "first-intent.json"
+    second = tmp_path / "second-intent.json"
+    report = tmp_path / "execution.json"
+    _write_empty_repair_intent_pair(first, report)
+    second.write_bytes(first.read_bytes())
+
+    exit_code = run(
+        [
+            "intent-status",
+            "--intent-receipt",
+            str(first),
+            "--intent-receipt",
+            str(second),
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == 2
+    assert output.out == ""
+    assert output.err == "Intent Receiptは1件だけ指定してください。\n"
+    assert str(tmp_path) not in output.err
+
+
+def test_intent_status_cli_final_report_order_is_deterministic(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt = tmp_path / "intent.json"
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    _write_empty_repair_intent_pair(receipt, first)
+    second.write_bytes(first.read_bytes().replace(b"{", b"{ ", 1))
+
+    common = ["intent-status", "--intent-receipt", str(receipt)]
+    assert run([*common, "--repair-execution", str(first), "--repair-execution", str(second)]) == 1
+    first_output = capsys.readouterr().out
+    assert run([*common, "--repair-execution", str(second), "--repair-execution", str(first)]) == 1
+    second_output = capsys.readouterr().out
+
+    assert first_output == second_output
+    assert json.loads(first_output)["reason"] == "multiple-final-reports"
 
 
 def test_audit_requires_source_and_creates_no_report(

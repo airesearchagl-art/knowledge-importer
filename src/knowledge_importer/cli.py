@@ -61,6 +61,11 @@ from knowledge_importer.document_metadata import (
     metadata_sidecar_path,
     write_document_metadata,
 )
+from knowledge_importer.intent_status import (
+    IntentStatusInputError,
+    inspect_operation_intent_status,
+    operation_intent_status_bytes,
+)
 from knowledge_importer.json_writer import write_json_atomically
 from knowledge_importer.markdown_normalization import (
     SUPPORTED_NORMALIZATION_PROFILES,
@@ -593,6 +598,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help="現在のBackup Cleanup Audit v1（複数指定可）",
+    )
+    intent_status_parser = subparsers.add_parser(
+        "intent-status",
+        help="Operation Intent Receiptとfinal report候補をread-onlyで照合",
+    )
+    intent_status_parser.add_argument(
+        "--intent-receipt",
+        action="append",
+        type=Path,
+        metavar="PATH",
+        required=True,
+        help="照合するOperation Intent Receipt v1",
+    )
+    intent_status_parser.add_argument(
+        "--repair-execution",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help="Repair Execution Report v1候補（複数指定可）",
+    )
+    intent_status_parser.add_argument(
+        "--backup-cleanup-audit",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help="Backup Cleanup Audit v1候補（複数指定可）",
     )
     return parser
 
@@ -1209,6 +1242,27 @@ def _run_operational_audit_verify(
     return result.exit_code
 
 
+def _run_intent_status(
+    receipt_path: Path,
+    *,
+    repair_execution_paths: Sequence[Path],
+    backup_cleanup_audit_paths: Sequence[Path],
+) -> int:
+    try:
+        status = inspect_operation_intent_status(
+            receipt_path,
+            repair_execution_paths=repair_execution_paths,
+            backup_cleanup_audit_paths=backup_cleanup_audit_paths,
+        )
+        content = operation_intent_status_bytes(status)
+    except (IntentStatusInputError, ValueError) as exc:
+        LOGGER.error("intent_status_invalid exception_type=%s", type(exc).__name__)
+        print("Intent Statusの入力を検証できませんでした。", file=sys.stderr)
+        return 2
+    sys.stdout.write(content.decode("utf-8"))
+    return status.exit_code
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -1290,6 +1344,15 @@ def run(
     if args.command == "audit-verify":
         return _run_operational_audit_verify(
             args.operational_audit_json,
+            repair_execution_paths=args.repair_execution,
+            backup_cleanup_audit_paths=args.backup_cleanup_audit,
+        )
+    if args.command == "intent-status":
+        if len(args.intent_receipt) != 1:
+            print("Intent Receiptは1件だけ指定してください。", file=sys.stderr)
+            return 2
+        return _run_intent_status(
+            args.intent_receipt[0],
             repair_execution_paths=args.repair_execution,
             backup_cleanup_audit_paths=args.backup_cleanup_audit,
         )
