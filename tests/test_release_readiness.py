@@ -196,6 +196,8 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "audit" in module_help
     assert "audit-verify" in module_help
     assert "intent-status" in module_help
+    assert "--package-root" in intent_status_help
+    assert "--backup-root" in intent_status_help
     for option in ("--manifest", "--report-json", "--strict"):
         assert option in validate_help
         assert option in repair_plan_help

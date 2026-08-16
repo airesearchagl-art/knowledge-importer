@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from knowledge_importer.backup_cleanup_execution import (
+    backup_cleanup_current_state_matches,
     parse_backup_cleanup_audit_bytes,
     verify_backup_cleanup_operation_intent_lifecycle,
 )
@@ -321,22 +322,38 @@ def inspect_operation_intent_status(
     approval_path: Path | None = None,
     preflight_path: Path | None = None,
     package_root: Path | None = None,
+    backup_root: Path | None = None,
 ) -> OperationIntentStatus:
     """Stable-read source artifacts and return a read-only pairing snapshot."""
 
     try:
         receipt_content = read_input_bytes(receipt_path)
         receipt = parse_operation_intent_bytes(receipt_content)
-        if package_root is not None and (
-            receipt.operation_type != REPAIR_EXECUTION
-            or inventory_path is not None
-            or any(
-                path is None for path in (manifest_path, plan_path, approval_path, preflight_path)
-            )
-        ):
-            raise IntentStatusInputError(
-                "Repair package root requires complete Repair lifecycle inputs"
-            )
+        roots_requested = package_root is not None or backup_root is not None
+        if roots_requested:
+            if receipt.operation_type == REPAIR_EXECUTION:
+                if (
+                    package_root is None
+                    or backup_root is not None
+                    or inventory_path is not None
+                    or any(
+                        path is None
+                        for path in (manifest_path, plan_path, approval_path, preflight_path)
+                    )
+                ):
+                    raise IntentStatusInputError(
+                        "Repair package root requires complete Repair lifecycle inputs"
+                    )
+            elif (
+                package_root is None
+                or backup_root is None
+                or manifest_path is not None
+                or preflight_path is not None
+                or any(path is None for path in (inventory_path, plan_path, approval_path))
+            ):
+                raise IntentStatusInputError(
+                    "Cleanup roots require complete Cleanup lifecycle inputs"
+                )
         lifecycle_paths = (
             manifest_path,
             inventory_path,
@@ -393,10 +410,60 @@ def inspect_operation_intent_status(
             backup_cleanup_audit_contents=backup_cleanup_audit_contents,
             lifecycle_verification=lifecycle_verification,
         )
-        if package_root is None:
+        if not roots_requested:
             return status
         if status.classification != ORPHAN or status.lifecycle_inputs != VERIFIED:
             return replace(status, current_preconditions=NOT_APPLICABLE)
+
+        if receipt.operation_type == BACKUP_CLEANUP:
+            assert package_root is not None
+            assert backup_root is not None
+            assert inventory_path is not None
+            assert plan_path is not None
+            assert approval_path is not None
+            rebound = verify_backup_cleanup_operation_intent_lifecycle(
+                receipt_content,
+                inventory_path=inventory_path,
+                plan_path=plan_path,
+                approval_path=approval_path,
+            )
+            if not rebound.bindings_match or rebound.action_scope_matches is not True:
+                raise IntentStatusInputError(
+                    "Cleanup lifecycle inputs changed before current precondition verification"
+                )
+            if not receipt.actions:
+                rebound = verify_backup_cleanup_operation_intent_lifecycle(
+                    receipt_content,
+                    inventory_path=inventory_path,
+                    plan_path=plan_path,
+                    approval_path=approval_path,
+                )
+                if not rebound.bindings_match or rebound.action_scope_matches is not True:
+                    raise IntentStatusInputError(
+                        "Cleanup lifecycle inputs changed during current precondition verification"
+                    )
+                return replace(status, current_preconditions=NOT_APPLICABLE)
+            matches = backup_cleanup_current_state_matches(
+                package_root,
+                backup_root,
+                inventory_path=inventory_path,
+                plan_path=plan_path,
+                approval_path=approval_path,
+            )
+            rebound = verify_backup_cleanup_operation_intent_lifecycle(
+                receipt_content,
+                inventory_path=inventory_path,
+                plan_path=plan_path,
+                approval_path=approval_path,
+            )
+            if not rebound.bindings_match or rebound.action_scope_matches is not True:
+                raise IntentStatusInputError(
+                    "Cleanup lifecycle inputs changed during current precondition verification"
+                )
+            return replace(
+                status,
+                current_preconditions=VERIFIED if matches else MISMATCH,
+            )
 
         assert manifest_path is not None
         assert plan_path is not None
@@ -562,18 +629,13 @@ def parse_operation_intent_status_bytes(content: bytes) -> OperationIntentStatus
         and reason == FINAL_REPORT_MISSING
         and lifecycle_inputs in {NOT_PROVIDED, VERIFIED}
         and current_preconditions in {NOT_PROVIDED, VERIFIED, MISMATCH, NOT_APPLICABLE}
-        and (
-            current_preconditions == NOT_PROVIDED
-            or lifecycle_inputs == VERIFIED
-            and receipt.operation_type == REPAIR_EXECUTION
-        )
+        and (current_preconditions == NOT_PROVIDED or lifecycle_inputs == VERIFIED)
         and operator_action_required
         or classification == STALE
         and not final_reports
         and receipt_final_report == MISSING
         and lifecycle_inputs == MISMATCH
         and current_preconditions in {NOT_PROVIDED, NOT_APPLICABLE}
-        and (current_preconditions == NOT_PROVIDED or receipt.operation_type == REPAIR_EXECUTION)
         and lifecycle_reason
         and operator_action_required
         or classification == CONFLICTING
@@ -582,7 +644,6 @@ def parse_operation_intent_status_bytes(content: bytes) -> OperationIntentStatus
         and reason in _CONFLICT_REASONS
         and lifecycle_inputs in {NOT_PROVIDED, VERIFIED, MISMATCH}
         and current_preconditions in {NOT_PROVIDED, NOT_APPLICABLE}
-        and (current_preconditions == NOT_PROVIDED or receipt.operation_type == REPAIR_EXECUTION)
         and (len(final_reports) > 1) == (reason == MULTIPLE_FINAL_REPORTS)
         and (len(final_reports) > 1 or (reason == OPERATION_TYPE_MISMATCH) != source_type_matches)
         and operator_action_required
