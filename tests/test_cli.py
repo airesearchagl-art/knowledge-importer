@@ -303,6 +303,7 @@ def test_intent_status_help_describes_receipt_and_repeatable_final_reports(
     assert "--plan PATH" in help_text
     assert "--approval PATH" in help_text
     assert "--preflight PATH" in help_text
+    assert "--package-root PATH" in help_text
 
 
 def test_intent_status_cli_emits_paired_json_without_changing_sources(
@@ -375,6 +376,32 @@ def test_intent_status_cli_rejects_partial_lifecycle_inputs(
     output = capsys.readouterr()
     assert exit_code == 2
     assert output.out == ""
+    assert str(tmp_path) not in output.err
+    assert "Traceback" not in output.err
+
+
+def test_intent_status_cli_package_root_requires_complete_repair_lifecycle(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt = tmp_path / "intent.json"
+    unused_report = tmp_path / "unused.json"
+    _write_empty_repair_intent_pair(receipt, unused_report)
+
+    exit_code = run(
+        [
+            "intent-status",
+            "--intent-receipt",
+            str(receipt),
+            "--package-root",
+            str(tmp_path / "package"),
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == 2
+    assert output.out == ""
+    assert output.err == "Intent Statusの入力を検証できませんでした。\n"
     assert str(tmp_path) not in output.err
     assert "Traceback" not in output.err
 

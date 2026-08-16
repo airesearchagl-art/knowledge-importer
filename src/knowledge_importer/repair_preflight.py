@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import stat
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -125,6 +126,38 @@ def _sha256(content: bytes) -> str:
 
 def _is_link(path: Path) -> bool:
     return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return path.is_symlink()
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def _path_uses_link_or_reparse(path: Path) -> bool:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.exists() or current.is_symlink():
+            if _is_link_or_reparse(current):
+                return True
+        else:
+            break
+    return False
+
+
+def _validate_current_package_root(package_root: Path) -> None:
+    absolute = package_root.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if not current.exists() or _is_link_or_reparse(current) or not current.is_dir():
+            raise ValueError("unsafe Repair package root")
 
 
 def _resolve_safe_target(root: Path, relative_path: str) -> Path | None:
@@ -286,6 +319,38 @@ def build_repair_preflight(
         )
     )
     return RepairPreflight(plan_sha256, approval_sha256, actions)
+
+
+def repair_preflight_current_state_matches(
+    package_root: Path,
+    *,
+    manifest_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+    expected: RepairPreflight,
+) -> bool:
+    """Compare the current package snapshot with one bound Repair Preflight."""
+
+    _validate_current_package_root(package_root)
+    manifest_records = read_manifest_records(manifest_path)
+    for expected_action in expected.actions:
+        action = expected_action.repair_action
+        target = package_root.joinpath(*PurePosixPath(action.path).parts)
+        if _path_uses_link_or_reparse(target):
+            return False
+        if action.action is RepairActionCategory.REGENERATE_SIDECAR:
+            for record in _matching_manifest_records(manifest_records, action.path):
+                markdown = package_root.joinpath(*PurePosixPath(record.output_path).parts)
+                if _path_uses_link_or_reparse(markdown):
+                    return False
+
+    current = build_repair_preflight(
+        package_root,
+        manifest_path=manifest_path,
+        plan_path=plan_path,
+        approval_path=approval_path,
+    )
+    return current == expected
 
 
 def write_repair_preflight(path: Path, preflight: RepairPreflight) -> None:

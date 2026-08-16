@@ -773,6 +773,10 @@ final Repair Execution Report／Cleanup Auditのoptional fieldはReceipt exact b
 
 `knowledge-importer intent-status --intent-receipt PATH [--repair-execution PATH ...] [--backup-cleanup-audit PATH ...]`は、1件のvalid Receiptと0件以上の明示指定されたfinal report候補をread-onlyでpairingします。Repair Receiptには`--manifest / --plan / --approval / --preflight`、Cleanup Receiptには`--inventory / --plan / --approval`をall-or-noneで追加でき、現在のlifecycle artifact実bytesとReceiptを照合します。Receiptと全sourceのexact bytesをstable readし、Receipt identityには`SHA-256(exact Receipt bytes)`だけを使います。filename、path、mtime、parse後payloadの再serialize hash、`attempt_id`単独ではbindingしません。
 
+Repair Receiptへ`--package-root PATH`を指定する場合はRepair lifecycle 4入力が必須です。final report候補が0件、`classification=orphan`、`lifecycle_inputs=verified`のときだけ、既存のRepair Preflight read-only評価を現在のpackageへ再実行します。Receipt-bound Repair actionが0件の場合はcurrent preconditionの検証対象がないためpackageを評価せず`current_preconditions=not-applicable`とします。`verified`は1件以上のReceipt-bound Repair actionについて、Preflightのaction index／action／target／reason categoryとtarget before-stateを含む全semanticを現在のpackageへ照合した場合だけ使用します。valid root内でtargetの存在、Markdown／sidecar digest、Manifest/package関係、safe pathが変わっていれば`mismatch`です。classificationは`orphan`、reasonは`final-report-missing`、終了コードは`1`のままです。
+
+package root自体が不存在、symlink、junction、reparse point、または検査不能なら終了コード`2`でStatusを生成しません。valid root内のtarget symlink／junction／reparse、消失、出現、digest変更は`mismatch`です。paired／conflicting／staleではpackage rootを読まず`not-applicable`とします。Cleanup ReceiptへのRepair用`--package-root`は終了コード`2`で、Cleanup current precondition検証はschema v1のこの段階では未実装です。
+
 ```json
 {
   "report_type": "knowledge-importer-operation-intent-status",
@@ -803,4 +807,6 @@ final Repair Execution Report／Cleanup Auditのoptional fieldはReceipt exact b
 
 `paired`だけが終了コード`0`です。paired + lifecycle mismatchでもpairing結果に従って`0`ですが、operator確認を要求します。validな`orphan / stale / conflicting`はstatus JSONを出力して終了コード`1`、CLI／I/O／schema／semantic不正、不完全またはoperation type不一致のlifecycle入力、同一final bytesの重複はstatusを生成せず終了コード`2`です。同一final bytesはpathやsource optionが異なってもduplicateです。`final_reports`は`(source_type, sha256)`順でcanonical化し、CLI指定順に依存しません。unknown v1 fieldは無視し、future schemaは拒否します。
 
-出力はUTF-8、2-space indent、trailing newlineで決定的です。`lifecycle_inputs`は入力なしで`not-provided`、完全一致で`verified`、binding／scope不一致で`mismatch`です。filesystem stateは検査しないため`current_preconditions`はorphan／stale／conflictingで`not-provided`、lifecycleを指定したpairedで`not-applicable`です。source path、absolute path、username、hostname、timestamp、cwd、command line、traceback、Unicode category Cfを含めません。`orphan / stale / conflicting`とpaired + lifecycle mismatchはoperator確認が必要ですが、mutation、success、failure、retry safetyを推測しません。Receipt、final report、lifecycle artifact、package、backup、Operational Auditを変更せず、destructive action、filesystem precondition検証、directory走査、自動retry、自動cleanupは行いません。暗号署名やartifactの真正性も証明しません。
+出力はUTF-8、2-space indent、trailing newlineで決定的です。`lifecycle_inputs`は入力なしで`not-provided`、完全一致で`verified`、binding／scope不一致で`mismatch`です。Repair orphanでpackage root未指定なら`current_preconditions=not-provided`、明示検査時は`verified / mismatch`、paired／conflicting／staleで検査を要求した場合は`not-applicable`です。source path、absolute path、username、hostname、timestamp、cwd、command line、traceback、Unicode category Cfを含めません。
+
+`current_preconditions=verified`はretry-safe、未実行、元PDF provenanceを意味しません。`mismatch`は実行済みや失敗を意味しません。Receipt単体もexecution proofではありません。Statusはread-onlyな現在snapshotであり、取得後のTOCTOU安全性、digest一致によるprovenance／authenticity、同じbytesへ復元された変更履歴を保証しません。元PDF実体は`--package-root`だけでは特定できないため再検証しません。Receipt、final report、lifecycle artifact、package、backup、Operational Auditを変更せず、destructive action、directory走査、自動retry、自動cleanupは行いません。
