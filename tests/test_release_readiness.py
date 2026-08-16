@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tomllib
+import unicodedata
 import zipfile
 from importlib.metadata import version
 from pathlib import Path
@@ -288,6 +289,68 @@ def test_readme_documents_every_public_batch_option() -> None:
     assert "knowledge-importer intent-status" in readme
     assert "Operation Intent Receipt v1" in readme
     assert version("knowledge-importer") == "0.1.0"
+
+
+def test_intent_status_operator_guide_contract() -> None:
+    guide_path = REPOSITORY_ROOT / "docs" / "intent-status-operator-guide.md"
+    readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+    output_contract = (REPOSITORY_ROOT / "docs" / "output-contract.md").read_text(encoding="utf-8")
+    guide = guide_path.read_text(encoding="utf-8")
+
+    assert guide_path.is_file()
+    assert "[Intent Status Operator Guide](docs/intent-status-operator-guide.md)" in readme
+    assert "[Intent Status Operator Guide](intent-status-operator-guide.md)" in output_contract
+
+    for classification in ("paired", "orphan", "stale", "conflicting"):
+        assert f"`{classification}`" in guide
+    for lifecycle_state in ("not-provided", "verified", "mismatch"):
+        assert f"`{lifecycle_state}" in guide or f"={lifecycle_state}`" in guide
+    for current_state in ("not-provided", "verified", "mismatch", "not-applicable"):
+        assert f"current_preconditions={current_state}" in guide or f" / {current_state}" in guide
+
+    for decision_case in (
+        "`paired` + `lifecycle_inputs=verified`",
+        "`paired` + `lifecycle_inputs=mismatch`",
+        "`orphan` + lifecycle verified + `current_preconditions=verified`",
+        "`orphan` + lifecycle verified + `current_preconditions=mismatch`",
+        "`orphan` + `current_preconditions=not-provided`",
+        "`orphan` + `current_preconditions=not-applicable`",
+        "| `stale` |",
+        "| `conflicting` |",
+    ):
+        assert decision_case in guide
+
+    for warning in (
+        "exit code 0 != safe to retry",
+        "exit code 0 != no operator action required",
+        "classification=paired != execution success",
+        "verified != retry-safe",
+        "verified != unexecuted",
+        "mismatch != executed",
+        "mismatch != failed",
+        "stale != execution proof",
+        "Receipt != execution proof",
+    ):
+        assert warning in guide
+
+    assert "`paired` + `lifecycle_inputs=mismatch`" in guide
+    assert "`operator_action_required=true`" in guide
+    assert "Human review required" in guide
+    assert "Automatic retry: prohibited" in guide
+    assert "Automatic cleanup: prohibited" in guide
+    assert "Receiptのsecurity identityはexact Receipt bytesのSHA-256" in guide
+    assert "同じ`attempt_id`を持つartifactが同一Receiptであるとは限らず" in guide
+    assert "TOCTOU安全性はありません" in guide
+
+    assert not any(unicodedata.category(character) == "Cf" for character in guide)
+    for unsafe_fragment in (
+        "C:\\Users\\",
+        "/home/",
+        "github_pat_",
+        "gho_",
+        "Bearer ",
+    ):
+        assert unsafe_fragment not in guide
 
 
 def test_public_release_gate_documents_keep_human_decisions_explicit() -> None:
