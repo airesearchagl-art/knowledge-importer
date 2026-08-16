@@ -45,6 +45,7 @@ from knowledge_importer.operation_intent import (
     REPAIR_EXECUTION,
     OperationIntentAction,
     OperationIntentBinding,
+    OperationIntentLifecycleVerification,
     OperationIntentReceipt,
     operation_intent_sha256,
     parse_operation_intent_bytes,
@@ -350,6 +351,67 @@ def _build_repair_operation_intent(
         REPAIR_EXECUTION,
         _repair_intent_bindings(inputs),
         _repair_intent_actions(inputs.preflight),
+    )
+
+
+def verify_repair_operation_intent_lifecycle(
+    receipt_content: bytes,
+    *,
+    manifest_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+    preflight_path: Path,
+) -> OperationIntentLifecycleVerification:
+    """Compare stable current Repair lifecycle inputs without inspecting package state."""
+
+    receipt = parse_operation_intent_bytes(receipt_content)
+    if receipt.operation_type != REPAIR_EXECUTION:
+        raise RepairExecutionInputError("Receipt operation type mismatch")
+    try:
+        manifest_content = read_input_bytes(manifest_path)
+        read_manifest_state(manifest_path)
+        plan_content = read_input_bytes(plan_path)
+        approval_content = read_input_bytes(approval_path)
+        preflight_content = read_input_bytes(preflight_path)
+        parse_repair_plan_bytes(plan_content)
+        parse_repair_approval_bytes(approval_content)
+        parse_repair_preflight_bytes(preflight_content)
+        stable_contents = (
+            read_input_bytes(manifest_path),
+            read_input_bytes(plan_path),
+            read_input_bytes(approval_path),
+            read_input_bytes(preflight_path),
+        )
+    except (OSError, ValueError) as exc:
+        raise RepairExecutionInputError("invalid Repair lifecycle input") from exc
+    contents = (
+        manifest_content,
+        plan_content,
+        approval_content,
+        preflight_content,
+    )
+    if contents != stable_contents:
+        raise RepairExecutionInputError("Repair lifecycle inputs changed during verification")
+    current_bindings = (
+        OperationIntentBinding("artifact-manifest", 1, _sha256(manifest_content)),
+        OperationIntentBinding("repair-plan", 1, _sha256(plan_content)),
+        OperationIntentBinding("repair-approval", 1, _sha256(approval_content)),
+        OperationIntentBinding("repair-preflight", 1, _sha256(preflight_content)),
+    )
+    if receipt.bindings != current_bindings:
+        return OperationIntentLifecycleVerification(False, None)
+
+    inputs = _read_and_bind_inputs(
+        manifest_path=manifest_path,
+        plan_path=plan_path,
+        approval_path=approval_path,
+        preflight_path=preflight_path,
+    )
+    if _repair_intent_bindings(inputs) != current_bindings:
+        raise RepairExecutionInputError("Repair lifecycle inputs changed during verification")
+    return OperationIntentLifecycleVerification(
+        True,
+        receipt.actions == _repair_intent_actions(inputs.preflight),
     )
 
 

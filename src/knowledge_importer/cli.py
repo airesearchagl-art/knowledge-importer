@@ -627,6 +627,36 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Backup Cleanup Audit v1候補（複数指定可）",
     )
+    intent_status_parser.add_argument(
+        "--manifest",
+        type=Path,
+        metavar="PATH",
+        help="Repair lifecycleのArtifact Manifest v1",
+    )
+    intent_status_parser.add_argument(
+        "--inventory",
+        type=Path,
+        metavar="PATH",
+        help="Cleanup lifecycleのBackup Inventory v1",
+    )
+    intent_status_parser.add_argument(
+        "--plan",
+        type=Path,
+        metavar="PATH",
+        help="Receiptに対応するPlan v1",
+    )
+    intent_status_parser.add_argument(
+        "--approval",
+        type=Path,
+        metavar="PATH",
+        help="Receiptに対応するApproval v1",
+    )
+    intent_status_parser.add_argument(
+        "--preflight",
+        type=Path,
+        metavar="PATH",
+        help="Repair lifecycleのPreflight v1",
+    )
     return parser
 
 
@@ -1247,12 +1277,22 @@ def _run_intent_status(
     *,
     repair_execution_paths: Sequence[Path],
     backup_cleanup_audit_paths: Sequence[Path],
+    manifest_path: Path | None,
+    inventory_path: Path | None,
+    plan_path: Path | None,
+    approval_path: Path | None,
+    preflight_path: Path | None,
 ) -> int:
     try:
         status = inspect_operation_intent_status(
             receipt_path,
             repair_execution_paths=repair_execution_paths,
             backup_cleanup_audit_paths=backup_cleanup_audit_paths,
+            manifest_path=manifest_path,
+            inventory_path=inventory_path,
+            plan_path=plan_path,
+            approval_path=approval_path,
+            preflight_path=preflight_path,
         )
         content = operation_intent_status_bytes(status)
     except (IntentStatusInputError, ValueError) as exc:
@@ -1355,6 +1395,11 @@ def run(
             args.intent_receipt[0],
             repair_execution_paths=args.repair_execution,
             backup_cleanup_audit_paths=args.backup_cleanup_audit,
+            manifest_path=args.manifest,
+            inventory_path=args.inventory,
+            plan_path=args.plan,
+            approval_path=args.approval,
+            preflight_path=args.preflight,
         )
     if (
         args.normalize_markdown is not None

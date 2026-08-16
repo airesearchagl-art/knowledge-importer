@@ -345,7 +345,7 @@ Receiptはexecution intentの証跡に限られ、execution、success、mutation
 
 Repair Executionのfinal ReportはReceipt exact bytes SHA-256と`attempt_id`へbindingし、formal verifierがReceipt、Report、Manifest、Plan、Approval、Preflightのexact-byte bindingとaction scopeを再照合できます。Backup CleanupもInventory、Plan、Approvalのexact bytesと承認済みsession scopeだけからReceiptを作り、削除直前にroot、session manifest、tree、backup file digest、Receipt／Audit pathを再検証します。final Cleanup AuditはReceipt exact bytes SHA-256へbindingし、formal verifierがReceipt、Audit、3入力、action順を再照合します。
 
-Receiptはintent proof、final Report／Auditはoutcome proofであり、Receipt単体はmutation、success、failure、retry safetyを証明しません。receipted modeではInventory／Plan／Approvalのstable read、schema／semantic、exact-byte SHA-256、承認action scopeを各不可逆actionの直前に再検証します。Receipt生成後の入力変更は終了コード`2`で検出し、当該sessionと後続sessionを削除しません。最初のaction前なら削除は0件です。途中action間で検出した場合もReceiptと変更された入力を保持し、既に削除したsessionはrollbackしません。この場合、変更後のlifecycle sourceへ正しくbindingできないためfinal Auditは生成しません。root／session precondition変更は削除前に終了コード`1`です。部分削除、Audit書込み・post-write検証失敗でもReceiptを保持し、削除済みsessionはrollbackしません。receipted modeのretryでは、新しいReceipt path、新しい`attempt_id`、新しいfinal Report／Audit pathをすべて使用します。stale判定、directory inventory、Operational Audit統合、Receipt cleanupは未実装です。
+Receiptはintent proof、final Report／Auditはoutcome proofであり、Receipt単体はmutation、success、failure、retry safetyを証明しません。receipted modeではInventory／Plan／Approvalのstable read、schema／semantic、exact-byte SHA-256、承認action scopeを各不可逆actionの直前に再検証します。Receipt生成後の入力変更は終了コード`2`で検出し、当該sessionと後続sessionを削除しません。最初のaction前なら削除は0件です。途中action間で検出した場合もReceiptと変更された入力を保持し、既に削除したsessionはrollbackしません。この場合、変更後のlifecycle sourceへ正しくbindingできないためfinal Auditは生成しません。root／session precondition変更は削除前に終了コード`1`です。部分削除、Audit書込み・post-write検証失敗でもReceiptを保持し、削除済みsessionはrollbackしません。receipted modeのretryでは、新しいReceipt path、新しい`attempt_id`、新しいfinal Report／Audit pathをすべて使用します。directory inventory、Operational Audit統合、Receipt cleanupは未実装です。
 
 ### Intent Receipt pairing status
 
@@ -354,17 +354,24 @@ Receiptはintent proof、final Report／Auditはoutcome proofであり、Receipt
 ```powershell
 uv run knowledge-importer intent-status `
   --intent-receipt .\reports\repair-intent.json `
-  --repair-execution .\reports\repair-execution.json
+  --repair-execution .\reports\repair-execution.json `
+  --manifest .\package\manifest.json `
+  --plan .\reports\repair-plan.json `
+  --approval .\reports\repair-approval.json `
+  --preflight .\reports\repair-preflight.json
 ```
 
-Receipt exact bytesのSHA-256をidentityとし、filename、path、mtime、`attempt_id`だけではpairingしません。Receipt SHA-256、`attempt_id`、`operation_type`、action scope、final reportが保持するlifecycle digestを比較し、結果をstdoutへ決定的なJSONで出力します。Repair final reportはArtifact Manifest digestを保持しないため、そのdigestを再検証済みとは扱いません。`lifecycle_inputs`と`current_preconditions`は常に`not-provided`です。
+Cleanup Receiptでは`--inventory`、`--plan`、`--approval`を同時指定します。Repairは4入力、Cleanupは3入力のall-or-noneで、部分指定やoperation typeに合わない入力は終了コード`2`です。lifecycle入力はstable readした実bytesのSHA-256とcanonical action scopeをReceiptへ照合し、parse後payloadの再serialize hash、filename、path、mtimeはidentityに使いません。filesystem上のcurrent preconditionはこの機能では検査しません。
+
+Receipt exact bytesのSHA-256をidentityとし、`attempt_id`だけではpairingしません。Receipt SHA-256、`attempt_id`、`operation_type`、action scope、final reportが保持するlifecycle digestを比較し、結果をstdoutへ決定的なJSONで出力します。Repair final reportにはArtifact Manifest digestがないため、final reportだけではそのdigestを再検証済みとは扱いません。
 
 - `paired`: 唯一のfinal report候補がReceiptと一致。終了コード`0`
-- `orphan`: valid Receiptにfinal report候補がない。終了コード`1`
+- `orphan`: valid Receiptにfinal report候補がなく、lifecycle入力未指定または完全一致。終了コード`1`
+- `stale`: orphan Receiptへ完全なlifecycle入力を指定し、exact-byte bindingまたはaction scopeが不一致。終了コード`1`
 - `conflicting`: 候補が複数、legacy report、またはReceipt／scope／bindingが不一致。終了コード`1`
 - CLI、I/O、Receipt／final report schema、同一final bytesの重複が不正。status JSONを出さず終了コード`2`
 
-`orphan`や`conflicting`は`operator_action_required=true`ですが、Receiptだけからmutation実施、成功、失敗、retry可否を推測しません。source path、absolute path、username、hostname、timestamp、cwd、command line、tracebackは出力せず、入力artifactやpackage、backupを変更しません。v1は明示入力された単一attemptのpairingだけを扱い、stale lifecycle input検証、directory走査、自動retry、自動cleanup、Operational Auditへの統合は行いません。暗号署名やartifactの真正性も証明しません。
+`stale`はorphanだけから派生し、pairedやconflictingを再分類しません。pairedで現在のlifecycle入力が不一致なら`classification=paired`、`lifecycle_inputs=mismatch`、`operator_action_required=true`としてpairingとfreshnessを分離します。`orphan / stale / conflicting`はoperator確認が必要ですが、Receiptやstale状態だけからmutation実施、成功、失敗、retry可否を推測しません。source path、absolute path、username、hostname、timestamp、cwd、command line、tracebackは出力せず、入力artifactやpackage、backupを変更しません。v1は明示入力された単一attemptだけを扱い、filesystem current precondition、directory走査、自動retry、自動cleanup、Operational Auditへの統合は行いません。暗号署名やartifactの真正性も証明しません。
 
 ### Recursive conversion / include・exclude filters
 

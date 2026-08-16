@@ -235,6 +235,11 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
         "--intent-receipt",
         "--repair-execution",
         "--backup-cleanup-audit",
+        "--manifest",
+        "--inventory",
+        "--plan",
+        "--approval",
+        "--preflight",
     ):
         assert option in intent_status_help
     metadata = _run_command(
