@@ -10,6 +10,7 @@ import pytest
 import knowledge_importer.backup_cleanup_execution as execution
 import knowledge_importer.backup_inventory as inventory_module
 import knowledge_importer.cli as cli
+import knowledge_importer.operation_intent as intent_module
 from knowledge_importer.artifact_manifest import ArtifactDigest
 from knowledge_importer.backup_cleanup_approval import (
     build_backup_cleanup_approval,
@@ -19,6 +20,7 @@ from knowledge_importer.backup_cleanup_execution import (
     BackupCleanupAudit,
     BackupCleanupAuditStatus,
     parse_backup_cleanup_audit_bytes,
+    verify_backup_cleanup_intent,
     write_backup_cleanup_audit,
 )
 from knowledge_importer.backup_cleanup_plan import (
@@ -35,6 +37,11 @@ from knowledge_importer.backup_inventory import (
     build_backup_inventory,
     write_backup_inventory,
     write_backup_session_manifest,
+)
+from knowledge_importer.operation_intent import (
+    BACKUP_CLEANUP,
+    operation_intent_sha256,
+    parse_operation_intent_bytes,
 )
 
 
@@ -148,6 +155,30 @@ def _args(
 
 def _run_lifecycle(paths: tuple[Path, Path, Path, Path, Path, Path]) -> int:
     return cli.run(_args(*paths))
+
+
+def _receipted_args(
+    paths: tuple[Path, Path, Path, Path, Path, Path],
+    receipt_path: Path,
+    *,
+    attempt_id: str = "cleanup-attempt-001",
+) -> list[str]:
+    return [
+        *_args(*paths),
+        "--intent-receipt",
+        str(receipt_path),
+        "--attempt-id",
+        attempt_id,
+    ]
+
+
+def _run_receipted(
+    paths: tuple[Path, Path, Path, Path, Path, Path],
+    receipt_path: Path,
+    *,
+    attempt_id: str = "cleanup-attempt-001",
+) -> int:
+    return cli.run(_receipted_args(paths, receipt_path, attempt_id=attempt_id))
 
 
 def _audit(path: Path) -> BackupCleanupAudit:
@@ -729,3 +760,501 @@ def test_empty_approval_produces_empty_audit_without_deleting_blocked_session(
     assert retry_audit.read_bytes() == first
     assert _audit(paths[4]).actions == ()
     assert (paths[0] / _session_name("rolled-back")).exists()
+
+
+def test_receipted_cleanup_binds_exact_receipt_and_inputs(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+
+    assert _run_receipted(paths, receipt_path) == 0
+
+    receipt_content = receipt_path.read_bytes()
+    receipt = parse_operation_intent_bytes(receipt_content)
+    audit_content = paths[4].read_bytes()
+    audit = parse_backup_cleanup_audit_bytes(audit_content)
+    assert receipt.operation_type == BACKUP_CLEANUP
+    assert [action.target for action in receipt.actions] == [_session_name("alpha")]
+    assert audit.intent_receipt is not None
+    assert audit.intent_receipt.attempt_id == "cleanup-attempt-001"
+    assert audit.intent_receipt.sha256 == operation_intent_sha256(receipt_content)
+    verify_backup_cleanup_intent(
+        receipt_content,
+        audit_content,
+        inventory_content=paths[1].read_bytes(),
+        plan_content=paths[2].read_bytes(),
+        approval_content=paths[3].read_bytes(),
+    )
+
+
+def test_receipted_cleanup_receipt_is_deterministic_for_same_scope(tmp_path: Path) -> None:
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first = _lifecycle(tmp_path / "first")
+    second = _lifecycle(tmp_path / "second")
+    first_receipt = tmp_path / "first" / "reports" / "intent.json"
+    second_receipt = tmp_path / "second" / "reports" / "intent.json"
+
+    assert _run_receipted(first, first_receipt) == 0
+    assert _run_receipted(second, second_receipt) == 0
+    assert first_receipt.read_bytes() == second_receipt.read_bytes()
+
+
+def test_receipted_cleanup_deletes_multiple_sessions_in_canonical_order(
+    tmp_path: Path,
+) -> None:
+    paths = _lifecycle(tmp_path, ("zulu", "alpha"))
+    receipt_path = tmp_path / "reports" / "intent.json"
+
+    assert _run_receipted(paths, receipt_path) == 0
+
+    assert [
+        action.target for action in parse_operation_intent_bytes(receipt_path.read_bytes()).actions
+    ] == [
+        _session_name("alpha"),
+        _session_name("zulu"),
+    ]
+    assert all(
+        action.status is BackupCleanupAuditStatus.DELETED for action in _audit(paths[4]).actions
+    )
+
+
+@pytest.mark.parametrize("option", ["attempt-only", "receipt-only"])
+def test_receipted_cleanup_options_must_be_paired(tmp_path: Path, option: str) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    args = _args(*paths)
+    args.extend(
+        ["--attempt-id", "cleanup-attempt-001"]
+        if option == "attempt-only"
+        else ["--intent-receipt", str(receipt_path)]
+    )
+
+    assert cli.run(args) == 2
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not receipt_path.exists()
+    assert not paths[4].exists()
+
+
+@pytest.mark.parametrize("conflict", ["audit", "inventory", "plan", "approval"])
+def test_receipt_path_cannot_conflict_with_lifecycle_artifact(
+    tmp_path: Path,
+    conflict: str,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    indexes = {"inventory": 1, "plan": 2, "approval": 3, "audit": 4}
+    receipt_path = paths[indexes[conflict]]
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not paths[4].exists()
+
+
+@pytest.mark.parametrize("root_index", [0, 5])
+def test_receipt_path_cannot_be_inside_backup_or_package_root(
+    tmp_path: Path,
+    root_index: int,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = paths[root_index] / "intent.json"
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not receipt_path.exists()
+    assert not paths[4].exists()
+
+
+def test_existing_receipt_is_preserved_before_deletion(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    receipt_path.write_bytes(b"foreign receipt")
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert receipt_path.read_bytes() == b"foreign receipt"
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not paths[4].exists()
+
+
+def test_concurrent_receipt_writer_is_preserved_before_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_link = intent_module.os.link
+    concurrent = b"concurrent receipt"
+
+    def create_foreign_before_commit(
+        source: Path,
+        destination: Path,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        Path(destination).write_bytes(concurrent)
+        original_link(source, destination, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(intent_module.os, "link", create_foreign_before_commit)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert receipt_path.read_bytes() == concurrent
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not paths[4].exists()
+
+
+@pytest.mark.parametrize("input_index", [1, 2, 3])
+def test_input_change_after_receipt_stops_before_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_index: int,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_write = execution.write_operation_intent
+
+    def write_then_change(path: Path, receipt: object) -> None:
+        original_write(path, receipt)  # type: ignore[arg-type]
+        target = paths[input_index]
+        target.write_bytes(target.read_bytes().replace(b"{", b"{ ", 1))
+
+    monkeypatch.setattr(execution, "write_operation_intent", write_then_change)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert receipt_path.exists()
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not paths[4].exists()
+
+
+@pytest.mark.parametrize("input_index", [1, 2, 3])
+def test_input_change_after_post_receipt_rebind_stops_before_first_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_index: int,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_verify = execution._verify_receipted_output_state
+    calls = 0
+    changed_bytes = b""
+
+    def verify_then_change(*args: object, **kwargs: object) -> None:
+        nonlocal calls, changed_bytes
+        calls += 1
+        original_verify(*args, **kwargs)  # type: ignore[arg-type]
+        if calls == 2:
+            target = paths[input_index]
+            changed_bytes = target.read_bytes().replace(b"{", b"{ ", 1)
+            target.write_bytes(changed_bytes)
+
+    monkeypatch.setattr(execution, "_verify_receipted_output_state", verify_then_change)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert calls == 2
+    assert receipt_path.exists()
+    assert paths[input_index].read_bytes() == changed_bytes
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not paths[4].exists()
+
+
+def test_session_change_after_receipt_is_failed_without_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    backup = next((paths[0] / _session_name("alpha")).rglob("*.bak"))
+    original_write = execution.write_operation_intent
+
+    def write_then_change(path: Path, receipt: object) -> None:
+        original_write(path, receipt)  # type: ignore[arg-type]
+        backup.write_bytes(b"tampered after receipt")
+
+    monkeypatch.setattr(execution, "write_operation_intent", write_then_change)
+
+    assert _run_receipted(paths, receipt_path) == 1
+    assert receipt_path.exists()
+    assert backup.exists()
+    audit = _audit(paths[4])
+    assert audit.intent_receipt is not None
+    assert audit.actions[0].status is BackupCleanupAuditStatus.FAILED
+
+
+def test_root_boundary_change_after_receipt_stops_before_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    calls = 0
+
+    def roots(path: Path) -> tuple[Path, ...]:
+        nonlocal calls
+        calls += 1
+        return () if calls == 1 else (tmp_path.resolve(),)
+
+    monkeypatch.setattr(execution, "repository_roots", roots)
+
+    assert _run_receipted(paths, receipt_path) == 1
+    assert receipt_path.exists()
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert _audit(paths[4]).actions[0].status is BackupCleanupAuditStatus.FAILED
+
+
+def test_audit_path_change_after_receipt_stops_before_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_write = execution.write_operation_intent
+    foreign = b"concurrent audit"
+
+    def write_then_claim_audit(path: Path, receipt: object) -> None:
+        original_write(path, receipt)  # type: ignore[arg-type]
+        paths[4].write_bytes(foreign)
+
+    monkeypatch.setattr(execution, "write_operation_intent", write_then_claim_audit)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert receipt_path.exists()
+    assert paths[4].read_bytes() == foreign
+    assert (paths[0] / _session_name("alpha")).exists()
+
+
+def test_receipted_partial_failure_keeps_receipt_and_does_not_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path, contents=(b"first", b"second"))
+    receipt_path = tmp_path / "reports" / "intent.json"
+    session = paths[0] / _session_name("alpha")
+    first = session / "0000/documents/item-0.metadata.json.bak"
+    second = session / "0001/documents/item-1.metadata.json.bak"
+    original_unlink = Path.unlink
+
+    def fail_second(path: Path, *args: object, **kwargs: object) -> None:
+        if path == second:
+            raise PermissionError("synthetic denial")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_second)
+
+    assert _run_receipted(paths, receipt_path) == 1
+    assert receipt_path.exists()
+    assert not first.exists()
+    assert second.exists()
+    assert _audit(paths[4]).actions[0].status is BackupCleanupAuditStatus.FAILED
+
+
+def test_receipted_second_session_race_keeps_prior_deletion_and_stops_later(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path, ("alpha", "middle", "zulu"))
+    receipt_path = tmp_path / "reports" / "intent.json"
+    middle = paths[0] / _session_name("middle")
+    original = execution._validate_actual_session
+    calls = 0
+
+    def inject_during_second_action(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 5:
+            (middle / "race.bin").write_bytes(b"race")
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution, "_validate_actual_session", inject_during_second_action)
+
+    assert _run_receipted(paths, receipt_path) == 1
+    assert receipt_path.exists()
+    assert [action.status for action in _audit(paths[4]).actions] == [
+        BackupCleanupAuditStatus.DELETED,
+        BackupCleanupAuditStatus.FAILED,
+        BackupCleanupAuditStatus.NOT_RUN,
+    ]
+    assert not (paths[0] / _session_name("alpha")).exists()
+    assert middle.exists()
+    assert (paths[0] / _session_name("zulu")).exists()
+
+
+def test_receipted_input_change_between_sessions_stops_before_next_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path, ("alpha", "middle", "zulu"))
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_delete = execution._delete_session
+    changed_approval = b""
+    deletions = 0
+
+    def delete_then_change(*args: object, **kwargs: object) -> None:
+        nonlocal changed_approval, deletions
+        original_delete(*args, **kwargs)  # type: ignore[arg-type]
+        deletions += 1
+        if deletions == 1:
+            changed_approval = paths[3].read_bytes().replace(b"{", b"{ ", 1)
+            paths[3].write_bytes(changed_approval)
+
+    monkeypatch.setattr(execution, "_delete_session", delete_then_change)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert deletions == 1
+    assert receipt_path.exists()
+    assert paths[3].read_bytes() == changed_approval
+    assert not (paths[0] / _session_name("alpha")).exists()
+    assert (paths[0] / _session_name("middle")).exists()
+    assert (paths[0] / _session_name("zulu")).exists()
+    assert not paths[4].exists()
+
+
+def test_receipted_audit_write_failure_keeps_receipt_and_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+
+    def fail_write(path: Path, audit: object) -> None:
+        raise OSError("synthetic report failure")
+
+    monkeypatch.setattr(cli, "write_backup_cleanup_audit", fail_write)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert receipt_path.exists()
+    assert not paths[4].exists()
+    assert not (paths[0] / _session_name("alpha")).exists()
+
+
+def test_receipted_concurrent_audit_writer_is_preserved_after_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_link = execution.os.link
+    link_calls = 0
+    concurrent = b"concurrent audit"
+
+    def claim_second_final(
+        source: Path,
+        destination: Path,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        nonlocal link_calls
+        link_calls += 1
+        if link_calls == 2:
+            Path(destination).write_bytes(concurrent)
+        original_link(source, destination, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(execution.os, "link", claim_second_final)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert receipt_path.exists()
+    assert paths[4].read_bytes() == concurrent
+    assert not (paths[0] / _session_name("alpha")).exists()
+
+
+def test_receipted_post_write_verification_uses_actual_audit_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_verify = cli.verify_backup_cleanup_intent
+    verified_audits: list[bytes] = []
+
+    def record_verify(receipt_content: bytes, audit_content: bytes, **kwargs: bytes) -> None:
+        verified_audits.append(audit_content)
+        original_verify(receipt_content, audit_content, **kwargs)
+
+    monkeypatch.setattr(cli, "verify_backup_cleanup_intent", record_verify)
+
+    assert _run_receipted(paths, receipt_path) == 0
+    assert len(verified_audits) == 2
+    assert verified_audits[-1] == paths[4].read_bytes()
+
+
+def test_tampered_receipt_binding_is_rejected_by_formal_verifier(tmp_path: Path) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    assert _run_receipted(paths, receipt_path) == 0
+    payload = json.loads(paths[4].read_text(encoding="utf-8"))
+    payload["intent_receipt"]["sha256"] = "0" * 64
+    tampered_audit = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode()
+
+    with pytest.raises(ValueError, match="binding mismatch"):
+        verify_backup_cleanup_intent(
+            receipt_path.read_bytes(),
+            tampered_audit,
+            inventory_content=paths[1].read_bytes(),
+            plan_content=paths[2].read_bytes(),
+            approval_content=paths[3].read_bytes(),
+        )
+
+
+def test_receipted_outputs_do_not_expose_local_details(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+
+    assert _run_receipted(paths, receipt_path) == 0
+
+    captured = capsys.readouterr()
+    combined = (
+        captured.out
+        + captured.err
+        + receipt_path.read_text(encoding="utf-8")
+        + paths[4].read_text(encoding="utf-8")
+    )
+    assert str(tmp_path) not in combined
+    assert "Traceback" not in combined
+
+
+def test_receipted_retry_requires_new_receipt_attempt_and_audit_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    first_receipt = tmp_path / "reports" / "intent-a.json"
+    second_receipt = tmp_path / "reports" / "intent-b.json"
+    second_audit = tmp_path / "reports" / "audit-b.json"
+    backup = next((paths[0] / _session_name("alpha")).rglob("*.bak"))
+    original = backup.read_bytes()
+    original_write = execution.write_operation_intent
+    changed = False
+
+    def change_once(path: Path, receipt: object) -> None:
+        nonlocal changed
+        original_write(path, receipt)  # type: ignore[arg-type]
+        if not changed:
+            changed = True
+            backup.write_bytes(b"temporary tamper")
+
+    monkeypatch.setattr(execution, "write_operation_intent", change_once)
+
+    assert _run_receipted(paths, first_receipt, attempt_id="attempt-a") == 1
+    backup.write_bytes(original)
+    retry_paths = (*paths[:4], second_audit, paths[5])
+    assert _run_receipted(retry_paths, second_receipt, attempt_id="attempt-b") == 0
+    assert first_receipt.exists()
+    assert paths[4].exists()
+    assert second_receipt.exists()
+    assert second_audit.exists()
+
+
+def test_legacy_audit_field_set_remains_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path)
+
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("receipted input gate must not run in legacy mode")
+
+    monkeypatch.setattr(execution, "_verify_receipted_inputs_unchanged", fail_if_called)
+
+    assert _run_lifecycle(paths) == 0
+
+    payload = json.loads(paths[4].read_text(encoding="utf-8"))
+    assert "intent_receipt" not in payload
