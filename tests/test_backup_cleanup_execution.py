@@ -923,6 +923,37 @@ def test_input_change_after_receipt_stops_before_deletion(
     assert not paths[4].exists()
 
 
+@pytest.mark.parametrize("input_index", [1, 2, 3])
+def test_input_change_after_post_receipt_rebind_stops_before_first_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_index: int,
+) -> None:
+    paths = _lifecycle(tmp_path)
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_verify = execution._verify_receipted_output_state
+    calls = 0
+    changed_bytes = b""
+
+    def verify_then_change(*args: object, **kwargs: object) -> None:
+        nonlocal calls, changed_bytes
+        calls += 1
+        original_verify(*args, **kwargs)  # type: ignore[arg-type]
+        if calls == 2:
+            target = paths[input_index]
+            changed_bytes = target.read_bytes().replace(b"{", b"{ ", 1)
+            target.write_bytes(changed_bytes)
+
+    monkeypatch.setattr(execution, "_verify_receipted_output_state", verify_then_change)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert calls == 2
+    assert receipt_path.exists()
+    assert paths[input_index].read_bytes() == changed_bytes
+    assert (paths[0] / _session_name("alpha")).exists()
+    assert not paths[4].exists()
+
+
 def test_session_change_after_receipt_is_failed_without_deletion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1042,6 +1073,36 @@ def test_receipted_second_session_race_keeps_prior_deletion_and_stops_later(
     assert not (paths[0] / _session_name("alpha")).exists()
     assert middle.exists()
     assert (paths[0] / _session_name("zulu")).exists()
+
+
+def test_receipted_input_change_between_sessions_stops_before_next_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _lifecycle(tmp_path, ("alpha", "middle", "zulu"))
+    receipt_path = tmp_path / "reports" / "intent.json"
+    original_delete = execution._delete_session
+    changed_approval = b""
+    deletions = 0
+
+    def delete_then_change(*args: object, **kwargs: object) -> None:
+        nonlocal changed_approval, deletions
+        original_delete(*args, **kwargs)  # type: ignore[arg-type]
+        deletions += 1
+        if deletions == 1:
+            changed_approval = paths[3].read_bytes().replace(b"{", b"{ ", 1)
+            paths[3].write_bytes(changed_approval)
+
+    monkeypatch.setattr(execution, "_delete_session", delete_then_change)
+
+    assert _run_receipted(paths, receipt_path) == 2
+    assert deletions == 1
+    assert receipt_path.exists()
+    assert paths[3].read_bytes() == changed_approval
+    assert not (paths[0] / _session_name("alpha")).exists()
+    assert (paths[0] / _session_name("middle")).exists()
+    assert (paths[0] / _session_name("zulu")).exists()
+    assert not paths[4].exists()
 
 
 def test_receipted_audit_write_failure_keeps_receipt_and_deletion(
@@ -1182,8 +1243,16 @@ def test_receipted_retry_requires_new_receipt_attempt_and_audit_paths(
     assert second_audit.exists()
 
 
-def test_legacy_audit_field_set_remains_unchanged(tmp_path: Path) -> None:
+def test_legacy_audit_field_set_remains_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     paths = _lifecycle(tmp_path)
+
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("receipted input gate must not run in legacy mode")
+
+    monkeypatch.setattr(execution, "_verify_receipted_inputs_unchanged", fail_if_called)
 
     assert _run_lifecycle(paths) == 0
 

@@ -433,6 +433,25 @@ def _input_binding_identity(inputs: _ExecutionInputs) -> tuple[str, str, str]:
     return inputs.inventory_sha256, inputs.plan_sha256, inputs.approval_sha256
 
 
+def _verify_receipted_inputs_unchanged(
+    inventory_path: Path,
+    plan_path: Path,
+    approval_path: Path,
+    expected: _ExecutionInputs,
+) -> _ExecutionInputs:
+    """Reparse exact lifecycle bytes and preserve the Receipt-approved scope."""
+
+    current = _load_execution_inputs(inventory_path, plan_path, approval_path)
+    if (
+        _input_binding_identity(current) != _input_binding_identity(expected)
+        or current.actions != expected.actions
+    ):
+        raise BackupCleanupExecutionInputError(
+            "cleanup inputs changed after Operation Intent Receipt"
+        )
+    return current
+
+
 def _cleanup_intent_bindings(inputs: _ExecutionInputs) -> tuple[OperationIntentBinding, ...]:
     return (
         OperationIntentBinding("backup-inventory", 1, inputs.inventory_sha256),
@@ -791,11 +810,12 @@ def execute_backup_cleanup(
             inputs=inputs,
             attempt_id=attempt_id,
         )
-        rebound_inputs = _load_execution_inputs(inventory_path, plan_path, approval_path)
-        if _input_binding_identity(rebound_inputs) != _input_binding_identity(inputs):
-            raise BackupCleanupExecutionInputError(
-                "cleanup inputs changed after Operation Intent Receipt"
-            )
+        rebound_inputs = _verify_receipted_inputs_unchanged(
+            inventory_path,
+            plan_path,
+            approval_path,
+            inputs,
+        )
         assert report_path is not None
         _verify_receipted_output_state(
             intent_receipt_path,
@@ -856,6 +876,12 @@ def execute_backup_cleanup(
                 receipt_content,
                 intent_receipt,
                 report_path,
+            )
+            _verify_receipted_inputs_unchanged(
+                inventory_path,
+                plan_path,
+                approval_path,
+                inputs,
             )
         try:
             if (

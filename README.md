@@ -345,7 +345,7 @@ Receiptはexecution intentの証跡に限られ、execution、success、mutation
 
 Repair Executionのfinal ReportはReceipt exact bytes SHA-256と`attempt_id`へbindingし、formal verifierがReceipt、Report、Manifest、Plan、Approval、Preflightのexact-byte bindingとaction scopeを再照合できます。Backup CleanupもInventory、Plan、Approvalのexact bytesと承認済みsession scopeだけからReceiptを作り、削除直前にroot、session manifest、tree、backup file digest、Receipt／Audit pathを再検証します。final Cleanup AuditはReceipt exact bytes SHA-256へbindingし、formal verifierがReceipt、Audit、3入力、action順を再照合します。
 
-Receiptはintent proof、final Report／Auditはoutcome proofであり、Receipt単体はmutation、success、failure、retry safetyを証明しません。Receipt生成後の入力変更は削除前に終了コード`2`、root／session precondition変更は削除前に終了コード`1`です。部分削除、Audit書込み・post-write検証失敗でもReceiptを保持し、削除済みsessionはrollbackしません。receipted modeのretryでは、新しいReceipt path、新しい`attempt_id`、新しいfinal Report／Audit pathをすべて使用します。orphan／stale検出、Operational Audit統合、Receipt cleanupは未実装です。
+Receiptはintent proof、final Report／Auditはoutcome proofであり、Receipt単体はmutation、success、failure、retry safetyを証明しません。receipted modeではInventory／Plan／Approvalのstable read、schema／semantic、exact-byte SHA-256、承認action scopeを各不可逆actionの直前に再検証します。Receipt生成後の入力変更は終了コード`2`で検出し、当該sessionと後続sessionを削除しません。最初のaction前なら削除は0件です。途中action間で検出した場合もReceiptと変更された入力を保持し、既に削除したsessionはrollbackしません。この場合、変更後のlifecycle sourceへ正しくbindingできないためfinal Auditは生成しません。root／session precondition変更は削除前に終了コード`1`です。部分削除、Audit書込み・post-write検証失敗でもReceiptを保持し、削除済みsessionはrollbackしません。receipted modeのretryでは、新しいReceipt path、新しい`attempt_id`、新しいfinal Report／Audit pathをすべて使用します。orphan／stale検出、Operational Audit統合、Receipt cleanupは未実装です。
 
 ### Recursive conversion / include・exclude filters
 
