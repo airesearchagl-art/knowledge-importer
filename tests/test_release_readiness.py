@@ -52,6 +52,7 @@ EXPECTED_PACKAGE_MODULES = {
     "knowledge_importer/models.py",
     "knowledge_importer/operation_intent.py",
     "knowledge_importer/operational_audit.py",
+    "knowledge_importer/operational_audit_context.py",
     "knowledge_importer/package_validation.py",
     "knowledge_importer/quality_report.py",
     "knowledge_importer/repair_approval.py",
