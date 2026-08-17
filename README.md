@@ -351,6 +351,8 @@ Receiptはintent proof、final Report／Auditはoutcome proofであり、Receipt
 
 `intent-status`は1件のOperation Intent Receiptと、明示指定されたfinal Repair Execution Report／Backup Cleanup Audit候補をread-onlyで照合します。
 
+状態の4軸とHuman確認手順は[Intent Status Operator Guide](docs/intent-status-operator-guide.md)を参照してください。このガイドはautomatic retryやcleanupを許可せず、Statusからexecution outcomeを推測しません。
+
 ```powershell
 uv run knowledge-importer intent-status `
   --intent-receipt .\reports\repair-intent.json `
