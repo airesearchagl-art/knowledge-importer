@@ -293,6 +293,19 @@ source optionは各々複数回指定でき、Summaryの`sources`と`source_type
 
 この確認が保証するのはSummaryと現在のsource bytesのbindingだけです。Repair内のPlan／Approval／Preflight、Cleanup内のInventory／Plan／Approvalは元artifactが入力されないため、`internal_lifecycle_binding=not-provided`と明示します。Summary、source、package、backupを変更せず、新しいreportも作成しません。
 
+### Operational Audit Context v1
+
+Operational Audit v1 1件と0件以上のIntent Status v1を、read-onlyなevidence envelopeへ束ねられます。
+
+```powershell
+uv run knowledge-importer audit-context .\reports\operational-audit.json `
+  --intent-status .\reports\repair-intent-status.json `
+  --intent-status .\reports\cleanup-intent-status.json `
+  --report-json .\reports\operational-audit-context.json
+```
+
+`--intent-status`は省略または複数指定できます。Contextは各sourceのstable-read exact bytes SHA-256、件数、operator確認情報だけを決定的に投影し、sourceやpackageを変更しません。出力はcreate-only／no-clobberで、既存entryや並行writerを上書きしません。Contextはassociation proofではなく、pairedをsuccess、orphanをoutcome、stale／mismatchをfailureへ変換しません。parser成功はContext内部のself-consistencyだけを表し、現在のsource bytesとのbinding verifiedを意味しません。source bindingの再検証は次PRの`audit-context-verify`が担当します。
+
 ### Operation Intent Receipt v1
 
 Operation Intent Receipt v1は、Repair Execution／Backup Cleanupで承認済みの実行scopeをmutation開始前に固定するための共通contractです。両Executionでopt-in receipted modeへ接続済みです。

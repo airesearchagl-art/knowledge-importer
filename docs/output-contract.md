@@ -817,7 +817,15 @@ package／backup root自体が不存在、非directory、symlink、junction、re
 
 ## Operational Audit Context schema version 1
 
-Operational Audit Context v1は、1件のOperational Audit Summary v1と0件以上のOperation Intent Status v1をexact-byte SHA-256で束ねる、read-onlyなcompanion evidence envelopeです。既存Audit／Statusを変更せず、execution outcome、Receipt pairing、lifecycle freshness、current filesystem snapshotを単一の成功・失敗へ集約しません。CLIへの接続とsource binding verifierは後続PRのscopeです。
+Operational Audit Context v1は、1件のOperational Audit Summary v1と0件以上のOperation Intent Status v1をexact-byte SHA-256で束ねる、read-onlyなcompanion evidence envelopeです。既存Audit／Statusを変更せず、execution outcome、Receipt pairing、lifecycle freshness、current filesystem snapshotを単一の成功・失敗へ集約しません。CLIは次の形式でContextを生成します。source binding verifierは後続PRのscopeです。
+
+```powershell
+knowledge-importer audit-context OPERATIONAL_AUDIT_JSON `
+  --intent-status INTENT_STATUS_JSON `
+  --report-json AUDIT_CONTEXT_JSON
+```
+
+`OPERATIONAL_AUDIT_JSON`と`--report-json`は必須、`--intent-status`は0回以上指定できます。生成成功は終了コード`0`、CLI／schema／I/O／duplicate／output safety errorは`2`で、終了コード`1`は使用しません。エラー時は固定メッセージだけを表示し、path、credential、environment情報、tracebackを出力しません。
 
 ```json
 {

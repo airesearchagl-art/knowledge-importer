@@ -1,6 +1,9 @@
 import csv
 import json
 import logging
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +29,10 @@ from knowledge_importer.operation_intent import (
     OperationIntentReceipt,
     operation_intent_bytes,
     operation_intent_sha256,
+)
+from knowledge_importer.operational_audit_context import (
+    operational_audit_context_bytes,
+    parse_operational_audit_context_bytes,
 )
 from knowledge_importer.repair_execution import (
     RepairExecutionIntentReceipt,
@@ -108,6 +115,66 @@ def _write_empty_repair_execution(path: Path) -> None:
     )
 
 
+def _write_empty_operational_audit(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "report_type": "knowledge-importer-operational-audit",
+                "schema_version": 1,
+                "summary": {
+                    "operations": 0,
+                    "succeeded": 0,
+                    "partial": 0,
+                    "failed": 0,
+                    "rolled_back": 0,
+                    "not_run": 0,
+                    "operator_action_required": 0,
+                    "package_change_observed": None,
+                },
+                "sources": [
+                    {
+                        "source_type": "repair-execution",
+                        "schema_version": 1,
+                        "sha256": "a" * 64,
+                    }
+                ],
+                "operations": [],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_orphan_intent_status(path: Path, seed: str) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "report_type": "knowledge-importer-operation-intent-status",
+                "schema_version": 1,
+                "receipt": {
+                    "sha256": seed * 64,
+                    "operation_type": "repair-execution",
+                    "attempt_id": f"context-attempt-{seed}",
+                },
+                "classification": "orphan",
+                "final_reports": [],
+                "bindings": {
+                    "receipt_final_report": "missing",
+                    "lifecycle_inputs": "not-provided",
+                    "current_preconditions": "not-provided",
+                },
+                "operator_action_required": True,
+                "reason": "final-report-missing",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _write_empty_repair_intent_pair(receipt_path: Path, report_path: Path) -> None:
     receipt_bytes = operation_intent_bytes(
         OperationIntentReceipt(
@@ -153,6 +220,7 @@ def test_help_describes_convert_command() -> None:
     assert "approve-backup-cleanup" in help_text
     assert "backup-cleanup-execute" in help_text
     assert "audit" in help_text
+    assert "audit-context" in help_text
     assert "intent-status" in help_text
     assert "knowledge-importer" in help_text
 
@@ -286,6 +354,17 @@ def test_audit_verify_help_describes_summary_and_repeatable_sources(capsys: obje
     assert "OPERATIONAL_AUDIT_JSON" in help_text
     assert "--repair-execution PATH" in help_text
     assert "--backup-cleanup-audit PATH" in help_text
+
+
+def test_audit_context_help_describes_bound_sources_and_output(capsys: object) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["audit-context", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "OPERATIONAL_AUDIT_JSON" in help_text
+    assert "--intent-status INTENT_STATUS_JSON" in help_text
+    assert "--report-json AUDIT_CONTEXT_JSON" in help_text
 
 
 def test_intent_status_help_describes_receipt_and_repeatable_final_reports(
@@ -624,6 +703,301 @@ def test_audit_rejects_source_as_output_without_modification(tmp_path: Path) -> 
         == 2
     )
     assert source.read_bytes() == before
+
+
+def test_audit_context_cli_writes_audit_only_context(tmp_path: Path) -> None:
+    audit = tmp_path / "audit.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+
+    exit_code = run(["audit-context", str(audit), "--report-json", str(report)])
+
+    assert exit_code == 0
+    payload = _read_json_report(report)
+    assert payload["report_type"] == "knowledge-importer-operational-audit-context"
+    assert payload["summary"] == {
+        "audit_operations": 0,
+        "intent_statuses": 0,
+        "operator_action_required": False,
+    }
+
+
+def test_audit_context_cli_projects_one_status(tmp_path: Path) -> None:
+    audit = tmp_path / "audit.json"
+    status = tmp_path / "status.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(status, "1")
+
+    exit_code = run(
+        [
+            "audit-context",
+            str(audit),
+            "--intent-status",
+            str(status),
+            "--report-json",
+            str(report),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = _read_json_report(report)
+    assert len(payload["intent_statuses"]) == 1
+    assert payload["summary"]["operator_action_required"] is True
+
+
+def test_audit_context_cli_output_is_independent_of_status_argument_order(
+    tmp_path: Path,
+) -> None:
+    audit = tmp_path / "audit.json"
+    first_status = tmp_path / "first-status.json"
+    second_status = tmp_path / "second-status.json"
+    first_report = tmp_path / "first-context.json"
+    second_report = tmp_path / "second-context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(first_status, "1")
+    _write_orphan_intent_status(second_status, "2")
+
+    common = ["audit-context", str(audit)]
+    assert (
+        run(
+            [
+                *common,
+                "--intent-status",
+                str(first_status),
+                "--intent-status",
+                str(second_status),
+                "--report-json",
+                str(first_report),
+            ]
+        )
+        == 0
+    )
+    assert (
+        run(
+            [
+                *common,
+                "--intent-status",
+                str(second_status),
+                "--intent-status",
+                str(first_status),
+                "--report-json",
+                str(second_report),
+            ]
+        )
+        == 0
+    )
+
+    assert first_report.read_bytes() == second_report.read_bytes()
+    assert len(_read_json_report(first_report)["intent_statuses"]) == 2
+
+
+def test_audit_context_cli_rejects_duplicate_status_bytes(tmp_path: Path) -> None:
+    audit = tmp_path / "audit.json"
+    first_status = tmp_path / "first-status.json"
+    second_status = tmp_path / "second-status.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(first_status, "1")
+    second_status.write_bytes(first_status.read_bytes())
+
+    exit_code = run(
+        [
+            "audit-context",
+            str(audit),
+            "--intent-status",
+            str(first_status),
+            "--intent-status",
+            str(second_status),
+            "--report-json",
+            str(report),
+        ]
+    )
+
+    assert exit_code == 2
+    assert not report.exists()
+
+
+@pytest.mark.parametrize("source_type", ["audit", "status"])
+@pytest.mark.parametrize("future_schema", [False, True])
+def test_audit_context_cli_rejects_invalid_or_future_source(
+    tmp_path: Path,
+    source_type: str,
+    future_schema: bool,
+) -> None:
+    audit = tmp_path / "audit.json"
+    status = tmp_path / "status.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(status, "1")
+    source = audit if source_type == "audit" else status
+    payload = _read_json_report(source)
+    if future_schema:
+        payload["schema_version"] = 2
+    else:
+        payload["report_type"] = "invalid"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = run(
+        [
+            "audit-context",
+            str(audit),
+            "--intent-status",
+            str(status),
+            "--report-json",
+            str(report),
+        ]
+    )
+
+    assert exit_code == 2
+    assert not report.exists()
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_audit_context_cli_rejects_existing_output(tmp_path: Path, kind: str) -> None:
+    audit = tmp_path / "audit.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    if kind == "file":
+        report.write_bytes(b"foreign\n")
+    else:
+        report.mkdir()
+
+    exit_code = run(["audit-context", str(audit), "--report-json", str(report)])
+
+    assert exit_code == 2
+    if kind == "file":
+        assert report.read_bytes() == b"foreign\n"
+    else:
+        assert report.is_dir()
+
+
+def test_audit_context_cli_rejects_symlink_output_without_changing_target(
+    tmp_path: Path,
+) -> None:
+    audit = tmp_path / "audit.json"
+    target = tmp_path / "target.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    target.write_bytes(b"foreign\n")
+    try:
+        report.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    assert run(["audit-context", str(audit), "--report-json", str(report)]) == 2
+    assert target.read_bytes() == b"foreign\n"
+
+
+def test_audit_context_cli_rejects_reparse_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from knowledge_importer import operational_audit_context as context_module
+
+    audit = tmp_path / "audit.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    monkeypatch.setattr(
+        context_module,
+        "path_uses_link_or_reparse",
+        lambda path: path == report,
+    )
+
+    assert run(["audit-context", str(audit), "--report-json", str(report)]) == 2
+    assert not report.exists()
+
+
+def test_audit_context_cli_preserves_concurrent_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from knowledge_importer import operational_audit_context as context_module
+
+    audit = tmp_path / "audit.json"
+    report = tmp_path / "context.json"
+    foreign = b"concurrent writer\n"
+    _write_empty_operational_audit(audit)
+    real_link = os.link
+
+    def race_link(source: Path, final: Path, *, follow_symlinks: bool) -> None:
+        final.write_bytes(foreign)
+        real_link(source, final, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(context_module.os, "link", race_link)
+
+    assert run(["audit-context", str(audit), "--report-json", str(report)]) == 2
+    assert report.read_bytes() == foreign
+    assert list(tmp_path.glob(".context.json.*.tmp")) == []
+
+
+def test_audit_context_cli_preserves_sources_and_writes_parseable_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    audit = tmp_path / "audit.json"
+    status = tmp_path / "status.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(status, "1")
+    before = {path: path.read_bytes() for path in (audit, status)}
+
+    assert (
+        run(
+            [
+                "audit-context",
+                str(audit),
+                "--intent-status",
+                str(status),
+                "--report-json",
+                str(report),
+            ]
+        )
+        == 0
+    )
+
+    context = parse_operational_audit_context_bytes(report.read_bytes())
+    assert report.read_bytes() == operational_audit_context_bytes(context)
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_audit_context_cli_does_not_leak_paths_or_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    private = tmp_path / "private-user" / "missing-audit.json"
+    report = tmp_path / "context.json"
+
+    exit_code = run(["audit-context", str(private), "--report-json", str(report)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert str(tmp_path) not in captured.err
+    assert "private-user" not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_audit_context_module_entry_point_succeeds(tmp_path: Path) -> None:
+    audit = tmp_path / "audit.json"
+    report = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "knowledge_importer",
+            "audit-context",
+            str(audit),
+            "--report-json",
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "Operational Audit Context:" in completed.stdout
+    assert completed.stderr == ""
+    parse_operational_audit_context_bytes(report.read_bytes())
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:
