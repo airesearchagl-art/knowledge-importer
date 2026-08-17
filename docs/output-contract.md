@@ -814,3 +814,50 @@ package／backup root自体が不存在、非directory、symlink、junction、re
 出力はUTF-8、2-space indent、trailing newlineで決定的です。`lifecycle_inputs`は入力なしで`not-provided`、完全一致で`verified`、binding／scope不一致で`mismatch`です。orphanでroot未指定なら`current_preconditions=not-provided`、明示検査時は`verified / mismatch`、action 0件またはpaired／conflicting／staleなら`not-applicable`です。source path、absolute path、username、hostname、timestamp、cwd、command line、traceback、Unicode category Cfを含めません。Status schema version 1のfield、classification、reason、exit-code contractは変更しません。
 
 `current_preconditions=verified`はretry-safe、未実行、元PDF／backup provenance、物理root identityを意味しません。`mismatch`は実行済みや失敗を意味せず、session不存在も未実行／実行済みを区別しません。Receipt単体もexecution proofではありません。Statusはread-onlyな現在snapshotであり、取得後のTOCTOU安全性、digest一致によるprovenance／authenticity、同じbytesへ復元された変更履歴を保証しません。元PDF実体は`--package-root`だけでは特定できないため再検証しません。Receipt、final report、lifecycle artifact、package、backup、Operational Auditを変更せず、destructive action、directory走査、自動retry、自動cleanupは行いません。
+
+## Operational Audit Context schema version 1
+
+Operational Audit Context v1は、1件のOperational Audit Summary v1と0件以上のOperation Intent Status v1をexact-byte SHA-256で束ねる、read-onlyなcompanion evidence envelopeです。既存Audit／Statusを変更せず、execution outcome、Receipt pairing、lifecycle freshness、current filesystem snapshotを単一の成功・失敗へ集約しません。CLIへの接続とsource binding verifierは後続PRのscopeです。
+
+```json
+{
+  "report_type": "knowledge-importer-operational-audit-context",
+  "schema_version": 1,
+  "operational_audit": {
+    "schema_version": 1,
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "operations": 1,
+    "operator_action_required_count": 0
+  },
+  "intent_statuses": [
+    {
+      "schema_version": 1,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "operator_action_required": true
+    }
+  ],
+  "summary": {
+    "audit_operations": 1,
+    "intent_statuses": 1,
+    "operator_action_required": true
+  }
+}
+```
+
+### Evidence projection and identity
+
+builderはOperational Auditと各Intent Statusを正式parserで検証し、stable readしたexact input bytesのSHA-256だけをidentityとして記録します。filename、path、mtime、parse後payloadの再serialize hashは使いません。Audit sourceは必ず1件、Status sourceは0件以上です。Status projectionはSHA-256昇順でcanonical化し、同一Status bytesの重複を拒否します。異なるStatus同士のsemantic conflictやAudit operationとのassociationは判定しません。
+
+Audit projectionはschema version、exact-byte SHA-256、operation数、Auditが正式に集計したoperator action required件数だけを保持します。Status projectionはschema version、exact-byte SHA-256、正式Statusの`operator_action_required`だけを保持します。classification、outcome、reason、lifecycle freshness、current preconditions、Receipt SHA、action targetはContextへ複写しません。
+
+summaryの`audit_operations`と`intent_statuses`はprojection件数から再計算します。`operator_action_required`はAuditのrequired countが1以上、またはいずれかのStatus projectionが`true`なら`true`となる単純ORです。この値はHuman確認の必要性だけを集約し、automatic action、retry可否、cleanup eligibilityを生成しません。`false`もretry-safeや操作不要の保証ではありません。
+
+Context parserはrequired field、exact type、schema version 1、lowercase 64-hex SHA-256、非負整数、strict boolean、Status canonical順／duplicate、projectionから再計算したsummaryの整合を検証します。unknown v1 fieldは無視し、future schemaは拒否します。parser成功が証明するのはContext内部のself-consistencyだけです。projectionとsummaryが同時に整合する形で改変された場合、source実bytesなしではauthenticityを判定できません。source bindingをverifiedと呼べるのは、後続の`audit-context-verify`が現在のexact source bytesを再読取りしてprojectionを再構成・照合した場合だけです。
+
+Contextはevidenceの並置でありassociation proofではありません。orphan Statusをoutcomeへ変換せず、pairedをsuccessへ変換せず、stale／mismatchをexecution failureへ変換しません。Receipt／final report／Audit／Status／package／backupを変更せず、destructive action、automatic retry、Receipt cleanup、directory inventoryは行いません。
+
+### Deterministic immutable writer
+
+出力はUTF-8、2-space indent、trailing newlineで決定的です。timestamp、hostname、username、cwd、command line、source absolute path、traceback、Unicode category Cfを含めません。出力pathは新規entryだけを許可し、既存valid Context、foreign regular file、directory、symlink、junction／reparse point、検証不能entryを拒否します。
+
+writerは安全な親directoryを確認し、同一directoryのtemporary fileへ書いてflush／fsyncした後、`os.link(..., follow_symlinks=False)`でcreate-only／no-clobber commitします。`Path.replace()`で既存entryを上書きしません。並行writerがfinal pathを先に作成した場合はそのentryを保持し、temporary fileだけをbest-effortで削除します。final bytesはstable rereadして期待bytesと一致することを確認します。
