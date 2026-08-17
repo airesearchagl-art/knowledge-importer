@@ -88,6 +88,12 @@ from knowledge_importer.operational_audit import (
     verify_operational_audit_sources,
     write_operational_audit,
 )
+from knowledge_importer.operational_audit_context import (
+    OperationalAuditContextInputError,
+    build_operational_audit_context,
+    validate_operational_audit_context_output_path,
+    write_operational_audit_context,
+)
 from knowledge_importer.package_validation import (
     ValidationSeverity,
     validate_package,
@@ -598,6 +604,31 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help="現在のBackup Cleanup Audit v1（複数指定可）",
+    )
+    audit_context_parser = subparsers.add_parser(
+        "audit-context",
+        help="Operational AuditとIntent Statusをread-onlyで束ねる",
+    )
+    audit_context_parser.add_argument(
+        "operational_audit_json",
+        type=Path,
+        metavar="OPERATIONAL_AUDIT_JSON",
+        help="ContextへbindingするOperational Audit Summary v1",
+    )
+    audit_context_parser.add_argument(
+        "--intent-status",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="INTENT_STATUS_JSON",
+        help="ContextへbindingするOperation Intent Status v1（複数指定可）",
+    )
+    audit_context_parser.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="AUDIT_CONTEXT_JSON",
+        required=True,
+        help="新規pathへcreate-onlyで作成するOperational Audit Context v1",
     )
     intent_status_parser = subparsers.add_parser(
         "intent-status",
@@ -1284,6 +1315,48 @@ def _run_operational_audit_verify(
     return result.exit_code
 
 
+def _run_operational_audit_context(
+    operational_audit_path: Path,
+    *,
+    intent_status_paths: Sequence[Path],
+    report_json: Path,
+) -> int:
+    source_paths = (operational_audit_path, *intent_status_paths)
+    try:
+        if any(_paths_are_equal(path, report_json) for path in source_paths):
+            raise OperationalAuditContextInputError("source and output path conflict")
+        validate_operational_audit_context_output_path(report_json)
+        context = build_operational_audit_context(
+            operational_audit_path,
+            intent_status_paths=intent_status_paths,
+        )
+    except (OSError, OperationalAuditContextInputError) as exc:
+        LOGGER.error("operational_audit_context_invalid exception_type=%s", type(exc).__name__)
+        print(
+            "Operational Audit Contextの入力または出力先を検証できませんでした。",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        write_operational_audit_context(report_json, context)
+    except Exception as exc:  # noqa: BLE001 - output details remain sanitized.
+        LOGGER.error(
+            "operational_audit_context_write_failed exception_type=%s",
+            type(exc).__name__,
+        )
+        print("Operational Audit Contextを書き込めませんでした。", file=sys.stderr)
+        return 2
+    summary = context.payload()["summary"]
+    assert isinstance(summary, dict)
+    print(
+        "Operational Audit Context: "
+        f"audit_operations={summary['audit_operations']} "
+        f"intent_statuses={summary['intent_statuses']} "
+        f"operator_action_required={str(summary['operator_action_required']).lower()}"
+    )
+    return 0
+
+
 def _run_intent_status(
     receipt_path: Path,
     *,
@@ -1402,6 +1475,12 @@ def run(
             args.operational_audit_json,
             repair_execution_paths=args.repair_execution,
             backup_cleanup_audit_paths=args.backup_cleanup_audit,
+        )
+    if args.command == "audit-context":
+        return _run_operational_audit_context(
+            args.operational_audit_json,
+            intent_status_paths=args.intent_status,
+            report_json=args.report_json,
         )
     if args.command == "intent-status":
         if len(args.intent_receipt) != 1:

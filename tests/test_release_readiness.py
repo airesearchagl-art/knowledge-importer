@@ -181,6 +181,7 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     backup_cleanup_execute_help = _run_command([str(cli), "backup-cleanup-execute", "--help"])
     audit_help = _run_command([str(cli), "audit", "--help"])
     audit_verify_help = _run_command([str(cli), "audit-verify", "--help"])
+    audit_context_help = _run_command([str(cli), "audit-context", "--help"])
     intent_status_help = _run_command([str(cli), "intent-status", "--help"])
     module_help = _run_command([str(python), "-m", "knowledge_importer", "--help"])
     for option in EXPECTED_OPTIONS:
@@ -197,7 +198,11 @@ def test_wheel_build_install_and_entry_points(tmp_path: Path) -> None:
     assert "backup-cleanup-execute" in module_help
     assert "audit" in module_help
     assert "audit-verify" in module_help
+    assert "audit-context" in module_help
     assert "intent-status" in module_help
+    assert "OPERATIONAL_AUDIT_JSON" in audit_context_help
+    assert "--intent-status INTENT_STATUS_JSON" in audit_context_help
+    assert "--report-json AUDIT_CONTEXT_JSON" in audit_context_help
     assert "--package-root" in intent_status_help
     assert "--backup-root" in intent_status_help
     for option in ("--manifest", "--report-json", "--strict"):
@@ -287,6 +292,7 @@ def test_readme_documents_every_public_batch_option() -> None:
     assert "backup-inventory" in readme
     assert "knowledge-importer audit" in readme
     assert "knowledge-importer audit-verify" in readme
+    assert "knowledge-importer audit-context" in readme
     assert "knowledge-importer intent-status" in readme
     assert "Operation Intent Receipt v1" in readme
     assert version("knowledge-importer") == "0.1.0"
