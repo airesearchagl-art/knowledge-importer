@@ -35,6 +35,7 @@ from knowledge_importer.operational_audit_context import (
     build_operational_audit_context,
     operational_audit_context_bytes,
     parse_operational_audit_context_bytes,
+    verify_operational_audit_context_sources,
     write_operational_audit_context,
 )
 
@@ -463,3 +464,235 @@ def test_sources_are_byte_identical_and_paths_are_not_serialized(tmp_path: Path)
     assert str(private).encode() not in content
     for forbidden in (b"local-user", b"timestamp", b"hostname", b"traceback"):
         assert forbidden not in content.lower()
+
+
+def _write_context_fixture(
+    tmp_path: Path,
+    *,
+    audit: bytes | None = None,
+    statuses: tuple[bytes, ...] = (),
+) -> tuple[Path, Path, tuple[Path, ...]]:
+    audit_path, status_paths = _write_sources(tmp_path, audit=audit, statuses=statuses)
+    context_path = tmp_path / "context.json"
+    context_path.write_bytes(
+        operational_audit_context_bytes(
+            build_operational_audit_context(
+                audit_path,
+                intent_status_paths=status_paths,
+            )
+        )
+    )
+    return context_path, audit_path, status_paths
+
+
+def test_verifier_accepts_audit_only_exact_bytes(tmp_path: Path) -> None:
+    context_path, audit_path, _ = _write_context_fixture(tmp_path)
+
+    result = verify_operational_audit_context_sources(context_path, audit_path)
+
+    assert result.exit_code == 0
+    assert result.result == "verified"
+    assert result.audit_verified
+    assert result.intent_statuses_expected == 0
+    assert result.intent_statuses_provided == 0
+    assert result.matched == result.missing == result.unexpected == 0
+
+
+def test_verifier_accepts_multiple_statuses_independent_of_argument_order(
+    tmp_path: Path,
+) -> None:
+    statuses = (
+        _status_bytes("1", operator_action_required=False),
+        _status_bytes("2", operator_action_required=True),
+    )
+    context_path, audit_path, status_paths = _write_context_fixture(
+        tmp_path,
+        statuses=statuses,
+    )
+
+    forward = verify_operational_audit_context_sources(
+        context_path,
+        audit_path,
+        intent_status_paths=status_paths,
+    )
+    reverse = verify_operational_audit_context_sources(
+        context_path,
+        audit_path,
+        intent_status_paths=tuple(reversed(status_paths)),
+    )
+
+    assert forward == reverse
+    assert forward.exit_code == 0
+    assert forward.matched == 2
+    assert forward.console_summary().endswith("result=verified")
+
+
+@pytest.mark.parametrize("source_type", ["audit", "status"])
+def test_verifier_detects_valid_one_byte_source_tamper(
+    tmp_path: Path,
+    source_type: str,
+) -> None:
+    status = _status_bytes("1", operator_action_required=True)
+    context_path, audit_path, status_paths = _write_context_fixture(
+        tmp_path,
+        statuses=(status,),
+    )
+    source = audit_path if source_type == "audit" else status_paths[0]
+    source.write_bytes(source.read_bytes()[:-1] + b" ")
+
+    result = verify_operational_audit_context_sources(
+        context_path,
+        audit_path,
+        intent_status_paths=status_paths,
+    )
+
+    assert result.exit_code == 1
+    assert result.result == "mismatch"
+    if source_type == "audit":
+        assert not result.audit_verified
+    else:
+        assert result.missing == 1
+        assert result.unexpected == 1
+
+
+def test_verifier_detects_missing_and_unexpected_statuses(tmp_path: Path) -> None:
+    expected = _status_bytes("1", operator_action_required=True)
+    unexpected = _status_bytes("2", operator_action_required=False)
+    context_path, audit_path, status_paths = _write_context_fixture(
+        tmp_path,
+        statuses=(expected,),
+    )
+    unexpected_path = tmp_path / "unexpected.json"
+    unexpected_path.write_bytes(unexpected)
+
+    missing = verify_operational_audit_context_sources(context_path, audit_path)
+    extra = verify_operational_audit_context_sources(
+        context_path,
+        audit_path,
+        intent_status_paths=(*status_paths, unexpected_path),
+    )
+
+    assert missing.exit_code == 1
+    assert missing.missing == 1
+    assert missing.unexpected == 0
+    assert extra.exit_code == 1
+    assert extra.matched == 1
+    assert extra.unexpected == 1
+
+
+def test_verifier_rejects_duplicate_status_arguments(tmp_path: Path) -> None:
+    status = _status_bytes("1", operator_action_required=True)
+    context_path, audit_path, status_paths = _write_context_fixture(
+        tmp_path,
+        statuses=(status,),
+    )
+
+    with pytest.raises(OperationalAuditContextInputError, match="duplicate"):
+        verify_operational_audit_context_sources(
+            context_path,
+            audit_path,
+            intent_status_paths=(status_paths[0], status_paths[0]),
+        )
+
+
+@pytest.mark.parametrize("source_type", ["context", "audit", "status"])
+@pytest.mark.parametrize("future_schema", [False, True])
+def test_verifier_rejects_invalid_or_future_schema(
+    tmp_path: Path,
+    source_type: str,
+    future_schema: bool,
+) -> None:
+    status = _status_bytes("1", operator_action_required=True)
+    context_path, audit_path, status_paths = _write_context_fixture(
+        tmp_path,
+        statuses=(status,),
+    )
+    source = {
+        "context": context_path,
+        "audit": audit_path,
+        "status": status_paths[0],
+    }[source_type]
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if future_schema:
+        payload["schema_version"] = 2
+    else:
+        payload["report_type"] = "invalid"
+    source.write_bytes(_json_bytes(payload))
+
+    with pytest.raises(OperationalAuditContextInputError):
+        verify_operational_audit_context_sources(
+            context_path,
+            audit_path,
+            intent_status_paths=status_paths,
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "audit-sha",
+        "audit-operations",
+        "audit-required",
+        "status-sha",
+        "status-required",
+    ],
+)
+def test_verifier_detects_context_projection_or_summary_tamper(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    audit = _audit_bytes("deleted")
+    status = _status_bytes("1", operator_action_required=True)
+    context_path, audit_path, status_paths = _write_context_fixture(
+        tmp_path,
+        audit=audit,
+        statuses=(status,),
+    )
+    payload = json.loads(context_path.read_text(encoding="utf-8"))
+    if tamper == "audit-sha":
+        payload["operational_audit"]["sha256"] = "f" * 64
+    elif tamper == "audit-operations":
+        payload["operational_audit"]["operations"] = 2
+        payload["summary"]["audit_operations"] = 2
+    elif tamper == "audit-required":
+        payload["operational_audit"]["operator_action_required_count"] = 1
+    elif tamper == "status-sha":
+        payload["intent_statuses"][0]["sha256"] = "f" * 64
+    else:
+        payload["intent_statuses"][0]["operator_action_required"] = False
+        payload["summary"]["operator_action_required"] = False
+    context_path.write_bytes(_json_bytes(payload))
+
+    result = verify_operational_audit_context_sources(
+        context_path,
+        audit_path,
+        intent_status_paths=status_paths,
+    )
+
+    assert result.exit_code == 1
+    assert result.result == "mismatch"
+
+
+def test_verifier_allows_unknown_v1_fields_and_preserves_sources(tmp_path: Path) -> None:
+    audit = json.loads(_audit_bytes().decode("utf-8"))
+    audit["future"] = {"ignored": True}
+    status = json.loads(_status_bytes("1", operator_action_required=True).decode("utf-8"))
+    status["future"] = {"ignored": True}
+    context_path, audit_path, status_paths = _write_context_fixture(
+        tmp_path,
+        audit=_json_bytes(audit),
+        statuses=(_json_bytes(status),),
+    )
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    context["future"] = {"ignored": True}
+    context_path.write_bytes(_json_bytes(context))
+    before = {path: path.read_bytes() for path in (context_path, audit_path, *status_paths)}
+
+    result = verify_operational_audit_context_sources(
+        context_path,
+        audit_path,
+        intent_status_paths=status_paths,
+    )
+
+    assert result.exit_code == 0
+    assert before == {path: path.read_bytes() for path in before}

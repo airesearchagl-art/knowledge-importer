@@ -304,7 +304,20 @@ uv run knowledge-importer audit-context .\reports\operational-audit.json `
   --report-json .\reports\operational-audit-context.json
 ```
 
-`--intent-status`は省略または複数指定できます。Contextは各sourceのstable-read exact bytes SHA-256、件数、operator確認情報だけを決定的に投影し、sourceやpackageを変更しません。出力はcreate-only／no-clobberで、既存entryや並行writerを上書きしません。Contextはassociation proofではなく、pairedをsuccess、orphanをoutcome、stale／mismatchをfailureへ変換しません。parser成功はContext内部のself-consistencyだけを表し、現在のsource bytesとのbinding verifiedを意味しません。source bindingの再検証は次PRの`audit-context-verify`が担当します。
+`--intent-status`は省略または複数指定できます。Contextは各sourceのstable-read exact bytes SHA-256、件数、operator確認情報だけを決定的に投影し、sourceやpackageを変更しません。出力はcreate-only／no-clobberで、既存entryや並行writerを上書きしません。Contextはassociation proofではなく、pairedをsuccess、orphanをoutcome、stale／mismatchをfailureへ変換しません。parser成功はContext内部のself-consistencyだけを表し、現在のsource bytesとのbinding verifiedを意味しません。
+
+作成済みContextと現在のsource実bytesは、read-onlyの`audit-context-verify`で再照合できます。
+
+```powershell
+uv run knowledge-importer audit-context-verify .\reports\operational-audit-context.json `
+  --operational-audit .\reports\operational-audit.json `
+  --intent-status .\reports\repair-intent-status.json `
+  --intent-status .\reports\cleanup-intent-status.json
+```
+
+検証はOperational Audit 1件と0件以上のIntent Statusについて、stable readしたexact bytes SHA-256、schema／semantic、Context projection、summary、Status exact setを現在のsourceから再構成して照合します。CLI指定順は結果へ影響しません。完全一致は終了コード`0`、missing／unexpected／SHA・projection・summary mismatchは`1`、CLI／I/O／Contextまたはsource自体のschema・semantic不正／同一Status input重複は`2`です。Contextとsourceは変更しません。
+
+`verified`はauthenticity、execution success、retry-safe、association、検証後のTOCTOU安全性を意味しません。Operational Audit内部の元Execution／Cleanup evidence bindingと、Intent Status内部のReceipt／lifecycle／current-precondition bindingは入力されないため検証せず、`not-provided`と表示します。
 
 ### Operation Intent Receipt v1
 

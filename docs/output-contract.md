@@ -860,7 +860,17 @@ Audit projectionはschema version、exact-byte SHA-256、operation数、Auditが
 
 summaryの`audit_operations`と`intent_statuses`はprojection件数から再計算します。`operator_action_required`はAuditのrequired countが1以上、またはいずれかのStatus projectionが`true`なら`true`となる単純ORです。この値はHuman確認の必要性だけを集約し、automatic action、retry可否、cleanup eligibilityを生成しません。`false`もretry-safeや操作不要の保証ではありません。
 
-Context parserはrequired field、exact type、schema version 1、lowercase 64-hex SHA-256、非負整数、strict boolean、Status canonical順／duplicate、projectionから再計算したsummaryの整合を検証します。unknown v1 fieldは無視し、future schemaは拒否します。parser成功が証明するのはContext内部のself-consistencyだけです。projectionとsummaryが同時に整合する形で改変された場合、source実bytesなしではauthenticityを判定できません。source bindingをverifiedと呼べるのは、後続の`audit-context-verify`が現在のexact source bytesを再読取りしてprojectionを再構成・照合した場合だけです。
+Context parserはrequired field、exact type、schema version 1、lowercase 64-hex SHA-256、非負整数、strict boolean、Status canonical順／duplicate、projectionから再計算したsummaryの整合を検証します。unknown v1 fieldは無視し、future schemaは拒否します。parser成功が証明するのはContext内部のself-consistencyだけです。projectionとsummaryが同時に整合する形で改変された場合、source実bytesなしではauthenticityを判定できません。source bindingをverifiedと呼べるのは、`audit-context-verify`が現在のexact source bytesを再読取りしてprojectionを再構成・照合した場合だけです。
+
+```powershell
+knowledge-importer audit-context-verify AUDIT_CONTEXT_JSON `
+  --operational-audit OPERATIONAL_AUDIT_JSON `
+  --intent-status INTENT_STATUS_JSON
+```
+
+verifierはContext v1を正式parseし、Operational Audit 1件と0件以上のIntent Statusをstable readして正式parseします。identityはpath、filename、mtime、parse後payloadではなくexact input bytesのSHA-256です。StatusはCLI順に依存しないexact setで比較し、missing、unexpected、同一bytesのduplicateを区別します。現在sourceからschema version、operation数、operator action required情報とContext summaryを再投影して完全一致を要求します。Context schemaは変更せず、source、Context、package、backupへ書込みません。
+
+完全一致は終了コード`0`、valid evidenceのmissing／unexpected／SHA・projection・summary mismatchは`1`、CLI／I/O／Contextまたはsourceのschema・semantic不正／同一Status input重複は`2`です。Operational Audit内部の元source bindingとIntent Status内部のReceipt／lifecycle／current-precondition bindingは入力されないため検証せず、associationも行いません。`verified`はauthenticity、execution success、retry-safe、検証後のTOCTOU安全性を保証しません。
 
 Contextはevidenceの並置でありassociation proofではありません。orphan Statusをoutcomeへ変換せず、pairedをsuccessへ変換せず、stale／mismatchをexecution failureへ変換しません。Receipt／final report／Audit／Status／package／backupを変更せず、destructive action、automatic retry、Receipt cleanup、directory inventoryは行いません。
 

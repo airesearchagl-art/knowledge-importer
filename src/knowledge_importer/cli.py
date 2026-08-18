@@ -92,6 +92,7 @@ from knowledge_importer.operational_audit_context import (
     OperationalAuditContextInputError,
     build_operational_audit_context,
     validate_operational_audit_context_output_path,
+    verify_operational_audit_context_sources,
     write_operational_audit_context,
 )
 from knowledge_importer.package_validation import (
@@ -629,6 +630,31 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="AUDIT_CONTEXT_JSON",
         required=True,
         help="新規pathへcreate-onlyで作成するOperational Audit Context v1",
+    )
+    audit_context_verify_parser = subparsers.add_parser(
+        "audit-context-verify",
+        help="Operational Audit Context source bindingをread-only再照合",
+    )
+    audit_context_verify_parser.add_argument(
+        "audit_context_json",
+        type=Path,
+        metavar="AUDIT_CONTEXT_JSON",
+        help="検証するOperational Audit Context v1",
+    )
+    audit_context_verify_parser.add_argument(
+        "--operational-audit",
+        type=Path,
+        metavar="OPERATIONAL_AUDIT_JSON",
+        required=True,
+        help="現在のOperational Audit Summary v1",
+    )
+    audit_context_verify_parser.add_argument(
+        "--intent-status",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="INTENT_STATUS_JSON",
+        help="現在のOperation Intent Status v1（複数指定可）",
     )
     intent_status_parser = subparsers.add_parser(
         "intent-status",
@@ -1357,6 +1383,37 @@ def _run_operational_audit_context(
     return 0
 
 
+def _run_operational_audit_context_verify(
+    context_path: Path,
+    *,
+    operational_audit_path: Path,
+    intent_status_paths: Sequence[Path],
+) -> int:
+    try:
+        result = verify_operational_audit_context_sources(
+            context_path,
+            operational_audit_path,
+            intent_status_paths=intent_status_paths,
+        )
+    except (OSError, OperationalAuditContextInputError) as exc:
+        LOGGER.error(
+            "operational_audit_context_verify_invalid exception_type=%s",
+            type(exc).__name__,
+        )
+        print(
+            "Operational Audit Contextまたはsourceを検証できませんでした。",
+            file=sys.stderr,
+        )
+        return 2
+    print(result.console_summary())
+    binding = "verified" if result.exit_code == 0 else "not-verified"
+    print("Bindings:")
+    print(f"context_source_binding={binding}")
+    print("operational_audit_internal_binding=not-provided")
+    print("intent_status_internal_binding=not-provided")
+    return result.exit_code
+
+
 def _run_intent_status(
     receipt_path: Path,
     *,
@@ -1481,6 +1538,12 @@ def run(
             args.operational_audit_json,
             intent_status_paths=args.intent_status,
             report_json=args.report_json,
+        )
+    if args.command == "audit-context-verify":
+        return _run_operational_audit_context_verify(
+            args.audit_context_json,
+            operational_audit_path=args.operational_audit,
+            intent_status_paths=args.intent_status,
         )
     if args.command == "intent-status":
         if len(args.intent_receipt) != 1:

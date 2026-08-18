@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ from knowledge_importer.operation_intent import (
     operation_intent_sha256,
 )
 from knowledge_importer.operational_audit_context import (
+    build_operational_audit_context,
     operational_audit_context_bytes,
     parse_operational_audit_context_bytes,
 )
@@ -172,6 +174,21 @@ def _write_orphan_intent_status(path: Path, seed: str) -> None:
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def _write_operational_audit_context(
+    path: Path,
+    audit_path: Path,
+    *status_paths: Path,
+) -> None:
+    path.write_bytes(
+        operational_audit_context_bytes(
+            build_operational_audit_context(
+                audit_path,
+                intent_status_paths=status_paths,
+            )
+        )
     )
 
 
@@ -365,6 +382,19 @@ def test_audit_context_help_describes_bound_sources_and_output(capsys: object) -
     assert "OPERATIONAL_AUDIT_JSON" in help_text
     assert "--intent-status INTENT_STATUS_JSON" in help_text
     assert "--report-json AUDIT_CONTEXT_JSON" in help_text
+
+
+def test_audit_context_verify_help_describes_context_and_current_sources(
+    capsys: object,
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["audit-context-verify", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "AUDIT_CONTEXT_JSON" in help_text
+    assert "--operational-audit OPERATIONAL_AUDIT_JSON" in help_text
+    assert "--intent-status INTENT_STATUS_JSON" in help_text
 
 
 def test_intent_status_help_describes_receipt_and_repeatable_final_reports(
@@ -998,6 +1028,258 @@ def test_audit_context_module_entry_point_succeeds(tmp_path: Path) -> None:
     assert "Operational Audit Context:" in completed.stdout
     assert completed.stderr == ""
     parse_operational_audit_context_bytes(report.read_bytes())
+
+
+def test_audit_context_verify_cli_accepts_audit_only_exact_binding(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    audit = tmp_path / "audit.json"
+    context = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_operational_audit_context(context, audit)
+
+    exit_code = run(
+        [
+            "audit-context-verify",
+            str(context),
+            "--operational-audit",
+            str(audit),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "audit=verified" in captured.out
+    assert "intent_statuses_expected=0" in captured.out
+    assert "result=verified" in captured.out
+    assert "context_source_binding=verified" in captured.out
+    assert "operational_audit_internal_binding=not-provided" in captured.out
+    assert "intent_status_internal_binding=not-provided" in captured.out
+
+
+def test_audit_context_verify_cli_accepts_multiple_statuses_in_any_order(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    audit = tmp_path / "audit.json"
+    first = tmp_path / "first-status.json"
+    second = tmp_path / "second-status.json"
+    context = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(first, "1")
+    _write_orphan_intent_status(second, "2")
+    _write_operational_audit_context(context, audit, first, second)
+
+    common = [
+        "audit-context-verify",
+        str(context),
+        "--operational-audit",
+        str(audit),
+    ]
+    assert run([*common, "--intent-status", str(first), "--intent-status", str(second)]) == 0
+    forward = capsys.readouterr()
+    assert run([*common, "--intent-status", str(second), "--intent-status", str(first)]) == 0
+    reverse = capsys.readouterr()
+
+    assert forward.err == reverse.err == ""
+    assert forward.out == reverse.out
+    assert "intent_statuses_expected=2" in forward.out
+    assert "matched=2" in forward.out
+
+
+@pytest.mark.parametrize("source_type", ["audit", "status"])
+def test_audit_context_verify_cli_reports_valid_one_byte_tamper_as_mismatch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    source_type: str,
+) -> None:
+    audit = tmp_path / "audit.json"
+    status = tmp_path / "status.json"
+    context = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(status, "1")
+    _write_operational_audit_context(context, audit, status)
+    source = audit if source_type == "audit" else status
+    source.write_bytes(source.read_bytes()[:-1] + b" ")
+
+    exit_code = run(
+        [
+            "audit-context-verify",
+            str(context),
+            "--operational-audit",
+            str(audit),
+            "--intent-status",
+            str(status),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.err == ""
+    assert "result=mismatch" in captured.out
+    assert "context_source_binding=not-verified" in captured.out
+
+
+def test_audit_context_verify_cli_reports_missing_and_unexpected_status(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    audit = tmp_path / "audit.json"
+    expected = tmp_path / "expected.json"
+    unexpected = tmp_path / "unexpected.json"
+    context = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(expected, "1")
+    _write_orphan_intent_status(unexpected, "2")
+    _write_operational_audit_context(context, audit, expected)
+
+    exit_code = run(
+        [
+            "audit-context-verify",
+            str(context),
+            "--operational-audit",
+            str(audit),
+            "--intent-status",
+            str(unexpected),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "missing=1" in captured.out
+    assert "unexpected=1" in captured.out
+
+
+def test_audit_context_verify_cli_rejects_duplicate_status_input(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    audit = tmp_path / "audit.json"
+    status = tmp_path / "status.json"
+    context = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(status, "1")
+    _write_operational_audit_context(context, audit, status)
+
+    exit_code = run(
+        [
+            "audit-context-verify",
+            str(context),
+            "--operational-audit",
+            str(audit),
+            "--intent-status",
+            str(status),
+            "--intent-status",
+            str(status),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "検証できませんでした" in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize("source_type", ["context", "audit", "status"])
+@pytest.mark.parametrize("future_schema", [False, True])
+def test_audit_context_verify_cli_rejects_invalid_or_future_artifact(
+    tmp_path: Path,
+    source_type: str,
+    future_schema: bool,
+) -> None:
+    audit = tmp_path / "audit.json"
+    status = tmp_path / "status.json"
+    context = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(status, "1")
+    _write_operational_audit_context(context, audit, status)
+    source = {"context": context, "audit": audit, "status": status}[source_type]
+    payload = _read_json_report(source)
+    if future_schema:
+        payload["schema_version"] = 2
+    else:
+        payload["report_type"] = "invalid"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = run(
+        [
+            "audit-context-verify",
+            str(context),
+            "--operational-audit",
+            str(audit),
+            "--intent-status",
+            str(status),
+        ]
+    )
+
+    assert exit_code == 2
+
+
+def test_audit_context_verify_cli_preserves_sources_and_does_not_leak_paths(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    private = tmp_path / "private-user"
+    private.mkdir()
+    audit = private / "audit.json"
+    status = private / "status.json"
+    context = private / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_orphan_intent_status(status, "1")
+    _write_operational_audit_context(context, audit, status)
+    before = {path: path.read_bytes() for path in (context, audit, status)}
+
+    exit_code = run(
+        [
+            "audit-context-verify",
+            str(context),
+            "--operational-audit",
+            str(audit),
+            "--intent-status",
+            str(status),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert before == {path: path.read_bytes() for path in before}
+    assert str(tmp_path) not in captured.out + captured.err
+    for forbidden in ("private-user", "Traceback", "timestamp", "hostname", "username"):
+        assert forbidden not in captured.out + captured.err
+    assert "association" not in captured.out.lower()
+    assert not any(
+        unicodedata.category(character) == "Cf" for character in captured.out + captured.err
+    )
+
+
+def test_audit_context_verify_module_entry_point_succeeds(tmp_path: Path) -> None:
+    audit = tmp_path / "audit.json"
+    context = tmp_path / "context.json"
+    _write_empty_operational_audit(audit)
+    _write_operational_audit_context(context, audit)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "knowledge_importer",
+            "audit-context-verify",
+            str(context),
+            "--operational-audit",
+            str(audit),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "Operational Audit Context Verify:" in completed.stdout
+    assert completed.stderr == ""
 
 
 def test_convert_command_uses_injected_converter(tmp_path: Path) -> None:
