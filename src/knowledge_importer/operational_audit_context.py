@@ -79,6 +79,53 @@ class OperationalAuditContext:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class OperationalAuditContextVerification:
+    audit_verified: bool
+    intent_statuses_expected: int
+    intent_statuses_provided: int
+    matched: int
+    missing: int
+    unexpected: int
+    status_projections_verified: bool
+    summary_verified: bool
+
+    @property
+    def exit_code(self) -> int:
+        return 0 if self.verified else 1
+
+    @property
+    def verified(self) -> bool:
+        return (
+            self.audit_verified
+            and self.matched == self.intent_statuses_expected
+            and self.matched == self.intent_statuses_provided
+            and not self.missing
+            and not self.unexpected
+            and self.status_projections_verified
+            and self.summary_verified
+        )
+
+    @property
+    def result(self) -> str:
+        return "verified" if self.verified else "mismatch"
+
+    def console_summary(self) -> str:
+        audit = "verified" if self.audit_verified else "mismatch"
+        return "\n".join(
+            (
+                "Operational Audit Context Verify:",
+                f"audit={audit}",
+                f"intent_statuses_expected={self.intent_statuses_expected}",
+                f"intent_statuses_provided={self.intent_statuses_provided}",
+                f"matched={self.matched}",
+                f"missing={self.missing}",
+                f"unexpected={self.unexpected}",
+                f"result={self.result}",
+            )
+        )
+
+
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -122,6 +169,53 @@ def build_operational_audit_context(
         sorted((projection for _, projection in statuses), key=lambda item: item.sha256)
     )
     return OperationalAuditContext(audit_projection, projections)
+
+
+def verify_operational_audit_context_sources(
+    context_path: Path,
+    operational_audit_path: Path,
+    *,
+    intent_status_paths: Sequence[Path] = (),
+) -> OperationalAuditContextVerification:
+    """Verify current exact source bytes against one immutable Context v1."""
+
+    try:
+        context = parse_operational_audit_context_bytes(read_input_bytes(context_path))
+    except (OSError, TypeError, ValueError) as exc:
+        raise OperationalAuditContextInputError("invalid Operational Audit Context report") from exc
+
+    _, audit_projection = _read_operational_audit(operational_audit_path)
+    statuses = [_read_intent_status(path)[1] for path in intent_status_paths]
+    provided_digests = [projection.sha256 for projection in statuses]
+    if len(set(provided_digests)) != len(provided_digests):
+        raise OperationalAuditContextInputError("duplicate Intent Status source")
+
+    expected_by_digest = {projection.sha256: projection for projection in context.intent_statuses}
+    provided_by_digest = {projection.sha256: projection for projection in statuses}
+    expected_digests = set(expected_by_digest)
+    actual_digests = set(provided_by_digest)
+    missing = len(expected_digests - actual_digests)
+    unexpected = len(actual_digests - expected_digests)
+    shared_digests = expected_digests & actual_digests
+    matched = len(shared_digests)
+    status_projections_verified = all(
+        provided_by_digest[digest] == expected_by_digest[digest] for digest in shared_digests
+    )
+
+    actual_context = OperationalAuditContext(
+        audit_projection,
+        tuple(sorted(statuses, key=lambda projection: projection.sha256)),
+    )
+    return OperationalAuditContextVerification(
+        audit_projection == context.operational_audit,
+        len(context.intent_statuses),
+        len(statuses),
+        matched,
+        missing,
+        unexpected,
+        status_projections_verified,
+        actual_context.payload()["summary"] == context.payload()["summary"],
+    )
 
 
 def _is_sha256(value: object) -> bool:
